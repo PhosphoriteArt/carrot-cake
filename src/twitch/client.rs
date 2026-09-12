@@ -9,36 +9,40 @@ use serenity::futures::StreamExt;
 use tokio::sync::broadcast;
 use twitch_api::{
     HelixClient,
-    helix::streams::Stream,
+    helix::{
+        search::Channel,
+        streams::Stream,
+        videos::{self, Video},
+    },
     twitch_oauth2::{AppAccessToken, TwitchToken},
     types::{ConduitId, UserId},
 };
 
 use crate::util::{
     SyncEvent,
-    metrics::{TOKEN_REFRESH, TOKEN_TTL, TracedHttpClient, increment},
+    metrics::{TOKEN_REFRESH, TOKEN_TTL, TracedHttpClient, increment, record},
 };
 
 #[derive(Clone, Debug)]
 pub enum Notification {
-    Online(Stream),
-    Update(Stream),
-    Offline(Stream),
+    Online(Stream, Option<Video>),
+    Update(Stream, Option<Video>),
+    Offline(Stream, Option<Video>),
 }
 
 impl Notification {
     pub fn stream(&self) -> &Stream {
         match self {
-            Notification::Online(stream)
-            | Notification::Update(stream)
-            | Notification::Offline(stream) => &stream,
+            Notification::Online(stream, _)
+            | Notification::Update(stream, _)
+            | Notification::Offline(stream, _) => &stream,
         }
     }
 }
 
 pub struct InnerOnlineClient {
     pub client: HelixClient<'static, TracedHttpClient>,
-    pub broadcaster_ids: HashMap<UserId, String>,
+    pub broadcaster_ids: HashMap<UserId, Channel>,
     pub conduit_id: ConduitId,
 
     pub curr_token: Mutex<AppAccessToken>,
@@ -47,11 +51,14 @@ pub struct InnerOnlineClient {
     pub cast: broadcast::Sender<Notification>,
 
     pub close: SyncEvent,
-    pub closed: SyncEvent,
+    pub ws_closed: SyncEvent,
+    pub live_sync_closed: SyncEvent,
+    pub full_sync_closed: SyncEvent,
+    pub prune_closed: SyncEvent,
 
     pub seen: Mutex<HashMap<String, time::Instant>>,
 
-    pub state: Mutex<HashMap<UserId, Stream>>,
+    pub state: Mutex<HashMap<UserId, (Stream, Option<Video>)>>,
 }
 
 impl InnerOnlineClient {
@@ -64,7 +71,8 @@ impl InnerOnlineClient {
                         continue;
                     }
                     _ = self.close.wait() => {
-                      break;
+                        self.prune_closed.signal().await;
+                        break;
                     }
                 }
             }
@@ -89,7 +97,7 @@ impl InnerOnlineClient {
     pub async fn maybe_refresh_token(&self) -> anyhow::Result<()> {
         let mut tok = self.curr_token.lock().unwrap().clone();
         if tok.expires_in().as_secs() >= 600 {
-            TOKEN_TTL.record(tok.expires_in().as_secs(), &[]);
+            record!(TOKEN_TTL, tok.expires_in().as_secs());
             log::debug!("No token refresh needed, expires in {:?}", tok.expires_in());
             increment!(TOKEN_REFRESH; "refreshed": "false");
             return Ok(());
@@ -123,7 +131,8 @@ impl InnerOnlineClient {
                         continue;
                     }
                     _ = self.close.wait() => {
-                      break;
+                        self.full_sync_closed.signal().await;
+                        break;
                     }
                 }
             }
@@ -142,7 +151,8 @@ impl InnerOnlineClient {
                         continue;
                     }
                     _ = self.close.wait() => {
-                      break;
+                        self.live_sync_closed.signal().await;
+                        break;
                     }
                 }
             }
@@ -186,18 +196,35 @@ impl InnerOnlineClient {
                 let next = next?;
                 observed.insert(next.user_id.clone());
 
+                let video = self
+                    .client
+                    .req_get(
+                        {
+                            let mut req = videos::GetVideosRequest::default();
+                            req.user_id = Some(next.user_id.clone().into());
+                            req.type_ = Some(videos::VideoTypeFilter::Archive);
+                            req.sort = Some(videos::Sort::Time);
+                            req.period = Some(videos::VideoPeriod::Day);
+                            req
+                        },
+                        &token,
+                    )
+                    .await?
+                    .first();
+
                 {
                     let mut state = self.state.lock().unwrap();
                     match state.entry(next.user_id.clone()) {
                         Entry::Occupied(mut ent) => {
-                            if *ent.get() != next {
-                                ent.insert(next.clone());
-                                self.cast.send(Notification::Update(next))?;
+                            let orig = ent.get();
+                            if (&orig.0, &orig.1) != (&next, &video) {
+                                ent.insert((next.clone(), video.clone()));
+                                self.cast.send(Notification::Update(next, video))?;
                             }
                         }
                         Entry::Vacant(ent) => {
-                            ent.insert(next.clone());
-                            self.cast.send(Notification::Online(next))?;
+                            ent.insert((next.clone(), video.clone()));
+                            self.cast.send(Notification::Online(next, video))?;
                         }
                     }
                 }
@@ -212,7 +239,7 @@ impl InnerOnlineClient {
                 match state.entry(uid) {
                     Entry::Occupied(ent) => {
                         let v = ent.remove();
-                        self.cast.send(Notification::Offline(v))?;
+                        self.cast.send(Notification::Offline(v.0, v.1))?;
                     }
                     Entry::Vacant(_) => {}
                 }

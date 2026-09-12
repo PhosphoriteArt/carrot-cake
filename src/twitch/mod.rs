@@ -29,6 +29,7 @@ pub(crate) mod client;
 pub(in crate::twitch) mod util;
 pub(in crate::twitch) mod websocket;
 
+#[derive(Clone)]
 pub struct OnlineClient {
     inner: Arc<InnerOnlineClient>,
 }
@@ -111,7 +112,7 @@ impl OnlineClient {
             let streamer = streamer??;
             log::info!("mapped {} => {}", streamer.broadcaster_login, streamer.id);
 
-            streamer_map.insert(streamer.id, streamer.broadcaster_login.into());
+            streamer_map.insert(streamer.id.clone(), streamer);
         }
 
         let client = OnlineClient {
@@ -121,9 +122,12 @@ impl OnlineClient {
                 curr_client_id: Mutex::new(None),
                 broadcaster_ids: streamer_map,
                 conduit_id: conduit.id,
-                cast: broadcast::channel(4).0,
+                cast: broadcast::channel(16).0,
                 close: SyncEvent::new(),
-                closed: SyncEvent::new(),
+                ws_closed: SyncEvent::new(),
+                live_sync_closed: SyncEvent::new(),
+                full_sync_closed: SyncEvent::new(),
+                prune_closed: SyncEvent::new(),
                 seen: Mutex::new(HashMap::new()),
                 state: Mutex::new(HashMap::new()),
             }),
@@ -145,14 +149,17 @@ impl OnlineClient {
 
     pub async fn close(&self) {
         self.inner.close.signal().await;
-        self.inner.closed.wait().await;
+        self.inner.ws_closed.wait().await;
+        self.live_sync_closed.wait().await;
+        self.full_sync_closed.wait().await;
+        self.prune_closed.wait().await;
     }
 
     #[tracing::instrument(skip(self))]
     async fn run_websocket(&self) -> anyhow::Result<()> {
         let innerarc = self.inner.clone();
         let close = self.close.clone();
-        let closed = self.closed.clone();
+        let closed = self.ws_closed.clone();
 
         tokio::spawn(async move {
             WebsocketRunner::new(close, innerarc).run().await;

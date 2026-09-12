@@ -1,8 +1,8 @@
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serenity::all::{ChannelId, GuildId};
+use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::{env, fs};
 
@@ -12,12 +12,13 @@ lazy_static! {
             .expect("failed to read file")
     )
     .expect("failed to parse config");
-    pub static ref BY_GUILD_ID: HashMap<GuildId, HashMap<String, HashSet<ChannelId>>> =
+    pub static ref BY_GUILD_ID: HashMap<GuildId, HashMap<String, HashMap<ChannelId, Option<String>>>> =
         derive_by_guild_id();
 }
 
-fn derive_by_guild_id() -> HashMap<GuildId, HashMap<String, HashSet<ChannelId>>> {
-    let mut map: HashMap<GuildId, HashMap<String, HashSet<ChannelId>>> = HashMap::new();
+fn derive_by_guild_id() -> HashMap<GuildId, HashMap<String, HashMap<ChannelId, Option<String>>>> {
+    let mut map: HashMap<GuildId, HashMap<String, HashMap<ChannelId, Option<String>>>> =
+        HashMap::new();
 
     for stream in &CONFIG.streams {
         for notify in &stream.notify {
@@ -30,16 +31,18 @@ fn derive_by_guild_id() -> HashMap<GuildId, HashMap<String, HashSet<ChannelId>>>
                     let inner = ent.get_mut();
                     match inner.entry(stream.streamer_login.clone()) {
                         Entry::Occupied(mut ent) => {
-                            ent.get_mut().insert(cid);
+                            ent.get_mut().insert(cid, notify.ping.clone());
                         }
                         Entry::Vacant(ent) => {
-                            ent.insert(HashSet::new()).insert(cid);
+                            ent.insert(HashMap::new()).insert(cid, notify.ping.clone());
                         }
                     }
                 }
                 Entry::Vacant(ent) => {
-                    ent.insert(HashMap::new())
-                        .insert(stream.streamer_login.clone(), HashSet::from_iter([cid]));
+                    ent.insert(HashMap::new()).insert(
+                        stream.streamer_login.clone(),
+                        HashMap::from_iter([(cid, notify.ping.clone())]),
+                    );
                 }
             }
         }
@@ -50,16 +53,17 @@ fn derive_by_guild_id() -> HashMap<GuildId, HashMap<String, HashSet<ChannelId>>>
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    streams: Vec<StreamConfig>,
+    pub streams: Vec<StreamConfig>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamConfig {
-    streamer_login: String,
-    notify: Vec<NotifyConfig>,
+    pub streamer_login: String,
+    pub notify: Vec<NotifyConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
 pub struct NotifyConfig {
-    guild_id: String,
-    channel_id: String,
+    pub guild_id: String,
+    pub channel_id: String,
+    pub ping: Option<String>,
 }
