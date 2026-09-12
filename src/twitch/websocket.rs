@@ -173,9 +173,8 @@ impl WebsocketConnection {
             return false;
         };
 
-        return keepalive > 0
-            && Instant::now().saturating_duration_since(last)
-                > (Duration::from_secs(keepalive) * 2);
+        keepalive > 0
+            && Instant::now().saturating_duration_since(last) > (Duration::from_secs(keepalive) * 2)
     }
 
     #[tracing::instrument(skip(self), fields(conn_id = self.id))]
@@ -341,7 +340,7 @@ impl WebsocketConnection {
                                 b.map_err(|e| anyhow!(e)).err(),
                             ]
                         })
-                        .filter_map(|x| x)
+                        .flatten()
                         .map(|err| format!("- {err}"))
                         .collect();
 
@@ -484,5 +483,5 @@ fn is_old(message: &EventsubWebsocketData<'_>) -> bool {
         return false;
     };
 
-    return Utc::now().signed_duration_since(dt) > TimeDelta::minutes(10);
+    Utc::now().signed_duration_since(dt) > TimeDelta::minutes(10)
 }

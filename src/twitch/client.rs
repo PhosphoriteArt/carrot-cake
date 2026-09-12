@@ -35,7 +35,7 @@ impl Notification {
         match self {
             Notification::Online(stream, _)
             | Notification::Update(stream, _)
-            | Notification::Offline(stream, _) => &stream,
+            | Notification::Offline(stream, _) => stream,
         }
     }
 }
@@ -190,7 +190,7 @@ impl InnerOnlineClient {
     #[tracing::instrument(skip_all, fields(users = keys.len()))]
     async fn do_sync(
         &self,
-        keys: impl Iterator<Item = UserId> + Clone + ExactSizeIterator,
+        keys: impl ExactSizeIterator<Item = UserId> + Clone,
     ) -> anyhow::Result<()> {
         let observed = {
             let iter = keys.clone().collect();
