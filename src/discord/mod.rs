@@ -1,27 +1,32 @@
 use std::{
+    collections::HashMap,
     ops::Deref,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use anyhow::Context;
+use chrono::{DateTime, Utc};
 use serenity::{
     Client,
     all::{
-        ActionRowComponent, ButtonKind, ChannelId, Color, ComponentType, CreateActionRow,
-        CreateButton, CreateEmbed, CreateMessage, CurrentUser, EditMessage, GatewayIntents,
-        GetMessages, GuildInfo, GuildPagination, Http, Message, MessageId,
+        ChannelId, Color, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor,
+        CreateEmbedFooter, CreateMessage, CurrentUser, EditMessage, GatewayIntents, GetMessages,
+        GuildInfo, GuildPagination, Http, Message, MessageId, Timestamp,
     },
 };
 use tokio::select;
-use twitch_api::{helix::streams::Stream, types::StreamId};
+use twitch_api::{
+    helix::{search::Channel, streams::Stream, videos::Video},
+    types::{StreamId, UserId},
+};
 
 use crate::{
     config::BY_GUILD_ID,
     twitch::client::Notification,
     util::{
         SyncEvent,
-        metrics::{GUILDS, UPDATES, increment},
+        metrics::{GUILDS, UPDATES, increment, record},
     },
 };
 
@@ -30,6 +35,10 @@ pub struct InnerConnection {
     close: SyncEvent,
     guilds: Mutex<Vec<GuildInfo>>,
     user: CurrentUser,
+    bcids: HashMap<UserId, Channel>,
+
+    closed_periodic_resync: SyncEvent,
+    closed_discord_client: SyncEvent,
 }
 
 #[derive(Clone)]
@@ -46,7 +55,7 @@ impl Deref for DiscordConnection {
 }
 
 impl DiscordConnection {
-    pub async fn new(token: String) -> anyhow::Result<Self> {
+    pub async fn new(token: String, bcids: HashMap<UserId, Channel>) -> anyhow::Result<Self> {
         let mut discord_client = Client::builder(
             &token,
             GatewayIntents::from_bits_retain(84992).union(GatewayIntents::MESSAGE_CONTENT),
@@ -62,10 +71,23 @@ impl DiscordConnection {
                 close: SyncEvent::new(),
                 guilds: Mutex::new(vec![]),
                 user,
+                bcids: bcids,
+                closed_periodic_resync: SyncEvent::new(),
+                closed_discord_client: SyncEvent::new(),
             }),
         };
 
         client.inner.clone().periodically_resync_guilds().await;
+
+        let shard_manager = discord_client.shard_manager.clone();
+        let await_closed = client.close.clone();
+        let discord_closed = client.closed_discord_client.clone();
+
+        tokio::spawn(async move {
+            await_closed.wait().await;
+            shard_manager.shutdown_all().await;
+            discord_closed.signal().await;
+        });
 
         tokio::spawn(async move {
             if let Err(e) = discord_client.start().await {
@@ -78,6 +100,8 @@ impl DiscordConnection {
 
     pub async fn close(&self) {
         self.close.signal().await;
+        self.closed_periodic_resync.wait().await;
+        self.closed_discord_client.wait().await;
     }
 
     pub async fn update_stream(&self, notif: Notification) -> anyhow::Result<()> {
@@ -94,6 +118,7 @@ impl InnerConnection {
                 }
                 select! {
                     _ = self.close.wait() => {
+                        self.closed_periodic_resync.signal().await;
                         return;
                     }
                     _ = tokio::time::sleep(Duration::from_mins(4)) => {
@@ -125,7 +150,7 @@ impl InnerConnection {
         }
 
         log::info!("Refreshed guilds: {} guilds", guilds.len());
-        GUILDS.record(guilds.len().try_into().unwrap_or_default(), &[]);
+        record!(GUILDS, guilds.len().try_into().unwrap_or_default());
         *self.guilds.lock().unwrap() = guilds;
 
         Ok(())
@@ -133,14 +158,20 @@ impl InnerConnection {
 
     async fn update_stream(&self, notif: Notification) -> anyhow::Result<()> {
         let guilds = self.guilds.lock().unwrap().clone();
+        let login = &notif.stream().user_login;
         for guild in guilds {
             let Some(cfg) = BY_GUILD_ID.get(&guild.id) else {
                 continue;
             };
-            let Some(channels) = cfg.get(notif.stream().id.as_str()) else {
+            let Some(channels) = cfg.get(notif.stream().user_login.as_str()) else {
                 continue;
             };
-            log::info!("Updating guild {} @ {:?}...", guild.id, channels);
+            log::info!(
+                "Updating guild {} @ {:?} for {}...",
+                guild.id,
+                channels,
+                login
+            );
 
             self.update_stream_for_guild(guild, notif.clone(), channels)
                 .await;
@@ -153,12 +184,15 @@ impl InnerConnection {
         &self,
         guild: GuildInfo,
         notif: Notification,
-        channels: impl IntoIterator<Item = &ChannelId>,
+        channels: impl IntoIterator<Item = (&ChannelId, &Option<String>)>,
     ) {
         let gid = guild.id;
         let gname = guild.name;
-        for channel in channels.into_iter() {
-            match self.update_stream_for_channel(channel, &notif).await {
+        for (channel, ping) in channels.into_iter() {
+            match self
+                .update_stream_for_channel(channel, ping.as_deref(), &notif)
+                .await
+            {
                 Ok(edit_type) => {
                     increment!(UPDATES; "guild": gid.to_string(), "guild_name": gname.clone(), "channel_id": channel.to_string(), "edit_type": edit_type);
                 }
@@ -198,12 +232,13 @@ impl InnerConnection {
     async fn update_stream_for_channel(
         &self,
         channel: &ChannelId,
+        ping: Option<&str>,
         notif: &Notification,
     ) -> anyhow::Result<&'static str> {
         let last_info = self.get_last_message_for(channel, notif).await?;
 
         match notif {
-            Notification::Online(stream) | Notification::Update(stream) => {
+            Notification::Online(stream, video) | Notification::Update(stream, video) => {
                 if let Some((message, stream_id)) = last_info
                     && stream.id == stream_id
                 {
@@ -212,9 +247,13 @@ impl InnerConnection {
                             self.client.deref(),
                             message,
                             EditMessage::new()
-                                .content(headline_streaming(&stream))
-                                .add_embed(stream_embed(&stream))
-                                .components(streaming_components(&stream)),
+                                .content(headline_streaming(ping, &stream))
+                                .add_embed(stream_embed(
+                                    &stream,
+                                    false,
+                                    self.bcids.get(&stream.user_id),
+                                ))
+                                .components(streaming_components(&stream, video.as_ref())),
                         )
                         .await?;
                     Ok("edit")
@@ -223,27 +262,36 @@ impl InnerConnection {
                         .send_message(
                             self.client.deref(),
                             CreateMessage::new()
-                                .content(headline_streaming(&stream))
-                                .add_embed(stream_embed(&stream))
-                                .components(streaming_components(&stream)),
+                                .content(headline_streaming(ping, &stream))
+                                .add_embed(stream_embed(
+                                    &stream,
+                                    false,
+                                    self.bcids.get(&stream.user_id),
+                                ))
+                                .components(streaming_components(&stream, video.as_ref())),
                         )
                         .await?;
                     Ok("new")
                 }
             }
-            Notification::Offline(stream) => {
+            Notification::Offline(stream, video) => {
                 if let Some((message, stream_id)) = last_info
                     && stream.id == stream_id
                 {
                     channel
-                        .edit_message(
-                            self.client.deref(),
-                            message,
-                            EditMessage::new()
-                                .content(headline_vod(&stream))
-                                .add_embed(stream_embed(&stream))
-                                .components(vod_components(&stream)),
-                        )
+                        .edit_message(self.client.deref(), message, {
+                            let mut msg = EditMessage::new()
+                                .content(headline_vod(ping, &stream))
+                                .add_embed(stream_embed(
+                                    &stream,
+                                    true,
+                                    self.bcids.get(&stream.user_id),
+                                ));
+                            if let Some(video) = video.as_ref() {
+                                msg = msg.components(vod_components(video))
+                            }
+                            msg
+                        })
                         .await?;
                     Ok("edit")
                 } else {
@@ -253,28 +301,45 @@ impl InnerConnection {
         }
     }
 }
-fn headline_vod(stream: &Stream) -> String {
-    format!("**{}** streamed", stream.user_name)
+fn headline_vod(ping: Option<&str>, stream: &Stream) -> String {
+    format!(
+        "{}**{}** streamed :projector:",
+        if let Some(ping) = ping {
+            ping.to_owned() + ", "
+        } else {
+            "".to_owned()
+        },
+        stream.user_name
+    )
 }
 
-fn headline_streaming(stream: &Stream) -> String {
-    format!("**{}** is streaming!", stream.user_name)
+fn headline_streaming(ping: Option<&str>, stream: &Stream) -> String {
+    format!(
+        "{}**{}** is streaming! :tada: ",
+        if let Some(ping) = ping {
+            ping.to_owned() + ", "
+        } else {
+            "".to_owned()
+        },
+        stream.user_name
+    )
 }
 
-fn streaming_components(stream: &Stream) -> Vec<CreateActionRow> {
-    vec![CreateActionRow::Buttons(vec![
-        stream_button(stream),
-        vod_button(stream),
-    ])]
+fn streaming_components(stream: &Stream, video: Option<&Video>) -> Vec<CreateActionRow> {
+    vec![CreateActionRow::Buttons(
+        [Some(stream_button(stream)), video.map(|v| vod_button(v))]
+            .into_iter()
+            .flatten()
+            .collect(),
+    )]
 }
 
-fn vod_components(stream: &Stream) -> Vec<CreateActionRow> {
-    vec![CreateActionRow::Buttons(vec![vod_button(stream)])]
+fn vod_components(video: &Video) -> Vec<CreateActionRow> {
+    vec![CreateActionRow::Buttons(vec![vod_button(video)])]
 }
 
-fn vod_button(stream: &Stream) -> CreateButton {
-    CreateButton::new_link(format!("https://twitch.tv/videos/{}", stream.id))
-        .label("Watch the VOD!")
+fn vod_button(video: &Video) -> CreateButton {
+    CreateButton::new_link(video.url.clone()).label("Watch the VOD!")
 }
 
 fn stream_button(stream: &Stream) -> CreateButton {
@@ -282,44 +347,85 @@ fn stream_button(stream: &Stream) -> CreateButton {
         .label("Watch the stream!")
 }
 
-fn stream_embed(stream: &Stream) -> CreateEmbed {
-    CreateEmbed::new()
-        .color(Color::from_rgb(255, 0, 0))
+fn stream_embed(stream: &Stream, offline: bool, chan: Option<&Channel>) -> CreateEmbed {
+    let fields: Vec<_> = [
+        (if !stream.game_name.is_empty() {
+            Some(("**Game name**", stream.game_name.clone(), true))
+        } else {
+            None
+        }),
+        Some(("**Viewers**", stream.viewer_count.to_string(), true)),
+        (if offline
+            && let Ok(dt) = DateTime::parse_from_rfc3339(&stream.started_at.to_string())
+            && let Ok(duration) = dt.signed_duration_since(Utc::now()).to_std()
+        {
+            Some((
+                "**Duration**",
+                humantime::format_duration(duration - Duration::new(0, duration.subsec_nanos()))
+                    .to_string(),
+                true,
+            ))
+        } else {
+            None
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let author = {
+        let mut cea = CreateEmbedAuthor::new(stream.user_name.to_string());
+        if let Some(chan) = chan {
+            cea = cea.icon_url(chan.thumbnail_url.to_string())
+        };
+        cea
+    };
+
+    let mut embed = CreateEmbed::new()
+        .color(Color::from_rgb(240, 161, 163))
         .title(if stream.title.trim().is_empty() {
             "<untitled>".to_string()
         } else {
             stream.title.clone()
         })
-        .description(if stream.game_name.is_empty() {
-            "<no game>".to_string()
-        } else {
-            stream.game_name.clone()
-        })
-        .url(format!("https://twitch.tv/{}", stream.user_login))
+        .fields(fields)
+        .author(author)
+        .thumbnail(format!(
+            "https://static-cdn.jtvnw.net/ttv-boxart/{}.jpg?_cc_id={}",
+            stream.game_id, stream.id
+        ))
+        .image(
+            stream
+                .thumbnail_url
+                .replace("{width}", "1080")
+                .replace("{height}", "720"),
+        )
+        .url(format!("https://twitch.tv/{}", stream.user_login));
+
+    if offline {
+        embed = embed
+            .footer(CreateEmbedFooter::new("Last online"))
+            .timestamp(Timestamp::now())
+    }
+
+    embed
 }
 
 fn get_stream_id(msg: &Message) -> Option<StreamId> {
-    msg.components
-        .iter()
-        .flat_map(|c| {
-            if matches!(c.kind, ComponentType::Button) {
-                c.components.iter()
-            } else {
-                [].iter()
-            }
-        })
-        .find_map(|c| {
-            let ActionRowComponent::Button(b) = c else {
-                return None;
-            };
-            let ButtonKind::Link { url } = &b.data else {
-                return None;
-            };
-            if !url.starts_with("https://twitch.tv/videos/") {
-                return None;
-            };
-            let id = &url["https://twitch.tv/videos/".len()..];
+    msg.embeds.iter().find_map(|e| {
+        let Some(thumb) = &e.thumbnail else {
+            return None;
+        };
+        let Ok(url) = reqwest::Url::parse(&thumb.url) else {
+            return None;
+        };
+        let Some(id) = url
+            .query_pairs()
+            .find_map(|(k, v)| if k == "_cc_id" { Some(v) } else { None })
+        else {
+            return None;
+        };
 
-            StreamId::try_from(id).ok()
-        })
+        StreamId::try_from(id.to_string()).ok()
+    })
 }
