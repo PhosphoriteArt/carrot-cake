@@ -5,7 +5,6 @@ use std::{
 };
 
 use anyhow::bail;
-use opentelemetry::KeyValue;
 use serenity::futures::StreamExt;
 use tokio::sync::broadcast;
 use twitch_api::{
@@ -17,7 +16,7 @@ use twitch_api::{
 
 use crate::util::{
     SyncEvent,
-    metrics::{TOKEN_REFRESH, TOKEN_TTL, TracedHttpClient},
+    metrics::{TOKEN_REFRESH, TOKEN_TTL, TracedHttpClient, increment},
 };
 
 #[derive(Clone, Debug)]
@@ -25,6 +24,16 @@ pub enum Notification {
     Online(Stream),
     Update(Stream),
     Offline(Stream),
+}
+
+impl Notification {
+    pub fn stream(&self) -> &Stream {
+        match self {
+            Notification::Online(stream)
+            | Notification::Update(stream)
+            | Notification::Offline(stream) => &stream,
+        }
+    }
 }
 
 pub struct InnerOnlineClient {
@@ -82,12 +91,12 @@ impl InnerOnlineClient {
         if tok.expires_in().as_secs() >= 600 {
             TOKEN_TTL.record(tok.expires_in().as_secs(), &[]);
             log::debug!("No token refresh needed, expires in {:?}", tok.expires_in());
-            TOKEN_REFRESH.add(1, &[KeyValue::new("refreshed", "false")]);
+            increment!(TOKEN_REFRESH; "refreshed": "false");
             return Ok(());
         }
 
         if let Err(e) = tok.refresh_token(&self.client).await {
-            TOKEN_REFRESH.add(1, &[KeyValue::new("refreshed", "error")]);
+            increment!(TOKEN_REFRESH; "refreshed": "error");
 
             return Err(e.into());
         }
@@ -97,7 +106,7 @@ impl InnerOnlineClient {
 
         log::info!("Auth token refreshed");
 
-        TOKEN_REFRESH.add(1, &[KeyValue::new("refreshed", "true")]);
+        increment!(TOKEN_REFRESH; "refreshed": "true");
 
         Ok(())
     }

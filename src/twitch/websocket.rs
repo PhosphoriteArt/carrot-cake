@@ -6,7 +6,6 @@ use std::{
     time::{self, Duration, Instant},
 };
 
-use opentelemetry::KeyValue;
 use serenity::futures::{StreamExt, future::join_all};
 use tokio::{sync::mpsc, time::timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -18,7 +17,7 @@ use crate::{
     twitch::{client::InnerOnlineClient, util::twitch_ws_url},
     util::{
         SyncEvent,
-        metrics::{TWITCH_MSG_RECEIVED, WS_CONNECT, WS_ERROR, WS_RECEIVED},
+        metrics::{TWITCH_MSG_RECEIVED, WS_CONNECT, WS_ERROR, WS_RECEIVED, increment},
     },
 };
 
@@ -168,13 +167,7 @@ impl WebsocketConnection {
     #[tracing::instrument(skip(self), fields(conn_id = self.id))]
     async fn run_websocket_inner(&self) {
         let observe = |success: bool| {
-            WS_CONNECT.add(
-                1,
-                &[
-                    KeyValue::new("success", success.to_string()),
-                    KeyValue::new("reconnect", self.is_reconnect.to_string()),
-                ],
-            )
+            increment!(WS_CONNECT; "success": success.to_string(), "reconnect": self.is_reconnect.to_string());
         };
 
         log::debug!("[WS] Connecting to {}...", self.url);
@@ -182,7 +175,7 @@ impl WebsocketConnection {
             Ok((ws_stream, _)) => ws_stream,
             Err(err) => {
                 log::warn!("Error connecting to Twitch websockets: {err:?}");
-                WS_ERROR.add(1, &[KeyValue::new("err", "connect")]);
+                increment!(WS_ERROR; "err": "connect");
                 observe(false);
                 return;
             }
@@ -213,7 +206,7 @@ impl WebsocketConnection {
                 }
                 Err(e) => {
                     log::error!("Error while reading websocket: {e:?}");
-                    WS_ERROR.add(1, &[KeyValue::new("err", "read_ws")]);
+                    increment!(WS_ERROR; "err": "read_ws");
                     break;
                 }
             };
@@ -224,13 +217,13 @@ impl WebsocketConnection {
                         if let Err(e) = ws_stream.close(None).await {
                             log::warn!("Error while closing: {e:?}");
                         };
-                        WS_ERROR.add(1, &[KeyValue::new("err", "close_intentional")]);
+                        increment!(WS_ERROR; "err": "close_intentional");
                         break;
                     }
                 }
                 Err(e) => {
                     log::warn!("Error handling websocket message: {e}");
-                    WS_ERROR.add(1, &[KeyValue::new("err", "close_unknown")]);
+                    increment!(WS_ERROR; "err": "close_unknown");
                 }
             }
         }
@@ -238,7 +231,7 @@ impl WebsocketConnection {
 
     #[tracing::instrument(skip(self, msg), fields(conn_id = self.id, msg_type = msg_type(&msg)))]
     async fn handle_websocket_msg(&self, msg: Message) -> anyhow::Result<bool> {
-        WS_RECEIVED.add(1, &[KeyValue::new("msg_type", msg_type(&msg))]);
+        increment!(WS_RECEIVED; "msg_type": msg_type(&msg));
 
         match msg {
             Message::Text(evt) => {
@@ -263,7 +256,7 @@ impl WebsocketConnection {
     #[tracing::instrument(skip(self), fields(conn_id = self.id))]
     async fn handle_event_data(&self, parsed: EventsubWebsocketData<'_>) -> anyhow::Result<bool> {
         log::debug!("[WS:T] Got message");
-        TWITCH_MSG_RECEIVED.add(1, &[KeyValue::new("msg_type", twitch_msg_type(&parsed))]);
+        increment!(TWITCH_MSG_RECEIVED; "msg_type": twitch_msg_type(&parsed));
 
         match parsed {
             EventsubWebsocketData::Welcome {

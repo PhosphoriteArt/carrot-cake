@@ -130,3 +130,23 @@ impl twitch_api::HttpClient for TracedHttpClient {
         Either::Left(fut)
     }
 }
+
+macro_rules! increment {
+    ($metric: expr$(; $($key:literal : $value:expr),*)?) => {
+        {&$metric}.add(1, &[
+            $($(opentelemetry::KeyValue::new($key, $value)),*)?
+        ])
+
+    };
+}
+pub(crate) use increment;
+
+macro_rules! record {
+    ($metric: expr, $v: expr$(; $($key:literal : $value:expr),*)?) => {
+        {&$metric}.record($v, &[
+            $($(opentelemetry::KeyValue::new($key, $value)),*)?
+        ])
+
+    };
+}
+pub(crate) use record;

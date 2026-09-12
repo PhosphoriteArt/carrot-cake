@@ -4,23 +4,23 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, bail};
-use opentelemetry::KeyValue;
+use anyhow::Context;
 use serenity::{
     Client,
     all::{
-        Color, CreateActionRow, CreateButton, CreateEmbed, CreateMessage, CurrentUser, EditMessage,
-        GatewayIntents, GetMessages, GuildInfo, GuildPagination, Http, SearchGuildMessagesParams,
+        ChannelId, Color, CreateActionRow, CreateButton, CreateEmbed, CreateMessage, CurrentUser,
+        EditMessage, GatewayIntents, GetMessages, GuildInfo, GuildPagination, Http,
     },
 };
 use tokio::select;
 use twitch_api::helix::streams::Stream;
 
 use crate::{
+    config::BY_GUILD_ID,
     twitch::client::Notification,
     util::{
         SyncEvent,
-        metrics::{GUILDS, UPDATES},
+        metrics::{GUILDS, UPDATES, increment},
     },
 };
 
@@ -133,33 +133,16 @@ impl InnerConnection {
     async fn update_stream(&self, notif: Notification) -> anyhow::Result<()> {
         let guilds = self.guilds.lock().unwrap().clone();
         for guild in guilds {
-            let gid = guild.id.clone();
-            let gname = guild.name.clone();
-            log::info!("Updating guild {}...", gid);
+            let Some(cfg) = BY_GUILD_ID.get(&guild.id) else {
+                continue;
+            };
+            let Some(channels) = cfg.get(notif.stream().id.as_str()) else {
+                continue;
+            };
+            log::info!("Updating guild {} @ {:?}...", guild.id, channels);
 
-            match self.update_stream_for_guild(guild, notif.clone()).await {
-                Ok(edit_type) => {
-                    UPDATES.add(
-                        1,
-                        &[
-                            KeyValue::new("guild", gid.to_string()),
-                            KeyValue::new("guild_name", gname),
-                            KeyValue::new("edit_type", edit_type),
-                        ],
-                    );
-                }
-                Err(e) => {
-                    UPDATES.add(
-                        1,
-                        &[
-                            KeyValue::new("guild", gid.to_string()),
-                            KeyValue::new("guild_name", gname),
-                            KeyValue::new("edit_type", "error"),
-                        ],
-                    );
-                    log::warn!("Error updating guild {}: {:?}...", gid, e)
-                }
-            }
+            self.update_stream_for_guild(guild, notif.clone(), channels)
+                .await;
         }
 
         Ok(())
@@ -169,33 +152,29 @@ impl InnerConnection {
         &self,
         guild: GuildInfo,
         notif: Notification,
+        channels: impl IntoIterator<Item = &ChannelId>,
+    ) {
+        let gid = guild.id;
+        let gname = guild.name;
+        for channel in channels.into_iter() {
+            match self.update_stream_for_channel(channel, &notif).await {
+                Ok(edit_type) => {
+                    increment!(UPDATES; "guild": gid.to_string(), "guild_name": gname.clone(), "channel_id": channel.to_string(), "edit_type": edit_type);
+                }
+                Err(e) => {
+                    increment!(UPDATES; "guild": gid.to_string(), "guild_name": gname.clone(), "channel_id": channel.to_string(), "edit_type": "error");
+                    log::warn!("Error updating guild {}: {:?}...", gid, e)
+                }
+            }
+        }
+    }
+
+    async fn update_stream_for_channel(
+        &self,
+        channel: &ChannelId,
+        notif: &Notification,
     ) -> anyhow::Result<&'static str> {
-        let ids = [self.user.id.clone()];
-
-        let Some(enable_message) = self
-            .client
-            .search_guild_messages(guild.id.clone(), &{
-                let mut search = SearchGuildMessagesParams::default();
-
-                search.mentions = &ids;
-                search.content = Some("enable!");
-                search.sort_by = Some("timestamp");
-                search.sort_order = Some("asc");
-                search.limit = Some(1u8);
-
-                search
-            })
-            .await?
-            .messages
-            .into_iter()
-            .next()
-            .and_then(|f| f.into_iter().next())
-        else {
-            bail!("Not enabled in guild {}", guild.id);
-        };
-
-        let cid = enable_message.channel_id;
-        let last_info = cid
+        let last_info = channel
             .messages(self.client.deref(), GetMessages::new().limit(50))
             .await?
             .into_iter()
@@ -228,25 +207,27 @@ impl InnerConnection {
                 if let Some((message, stream_id)) = last_info
                     && stream.id.to_string() == stream_id
                 {
-                    cid.edit_message(
-                        self.client.deref(),
-                        message,
-                        EditMessage::new()
-                            .content(headline_streaming(&stream))
-                            .add_embed(stream_embed(&stream))
-                            .components(streaming_components(&stream)),
-                    )
-                    .await?;
+                    channel
+                        .edit_message(
+                            self.client.deref(),
+                            message,
+                            EditMessage::new()
+                                .content(headline_streaming(&stream))
+                                .add_embed(stream_embed(&stream))
+                                .components(streaming_components(&stream)),
+                        )
+                        .await?;
                     Ok("edit")
                 } else {
-                    cid.send_message(
-                        self.client.deref(),
-                        CreateMessage::new()
-                            .content(headline_streaming(&stream))
-                            .add_embed(stream_embed(&stream))
-                            .components(streaming_components(&stream)),
-                    )
-                    .await?;
+                    channel
+                        .send_message(
+                            self.client.deref(),
+                            CreateMessage::new()
+                                .content(headline_streaming(&stream))
+                                .add_embed(stream_embed(&stream))
+                                .components(streaming_components(&stream)),
+                        )
+                        .await?;
                     Ok("new")
                 }
             }
@@ -254,15 +235,16 @@ impl InnerConnection {
                 if let Some((message, stream_id)) = last_info
                     && stream.id.to_string() == stream_id
                 {
-                    cid.edit_message(
-                        self.client.deref(),
-                        message,
-                        EditMessage::new()
-                            .content(headline_vod(&stream))
-                            .add_embed(stream_embed(&stream))
-                            .components(vod_components(&stream)),
-                    )
-                    .await?;
+                    channel
+                        .edit_message(
+                            self.client.deref(),
+                            message,
+                            EditMessage::new()
+                                .content(headline_vod(&stream))
+                                .add_embed(stream_embed(&stream))
+                                .components(vod_components(&stream)),
+                        )
+                        .await?;
                     Ok("edit")
                 } else {
                     Ok("none")

@@ -6,8 +6,9 @@ use ansi_term::{
 };
 use tokio::signal;
 
-use crate::{discord::DiscordConnection, twitch::OnlineClient, util::metrics};
+use crate::{config::BY_GUILD_ID, discord::DiscordConnection, twitch::OnlineClient, util::metrics};
 
+pub(crate) mod config;
 mod discord;
 pub(crate) mod twitch;
 pub(crate) mod util;
@@ -23,6 +24,9 @@ async fn main() -> anyhow::Result<()> {
     if cfg!(feature = "dev") {
         let _ = dotenv::dotenv();
     }
+
+    // Ensure config valid
+    let _ = BY_GUILD_ID;
 
     let discord_token = env::var("BOT_TOKEN").expect("Expected a token in the environment");
 
