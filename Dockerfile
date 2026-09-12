@@ -3,7 +3,7 @@ RUN apk add perl make ca-certificates
 
 WORKDIR /build
 COPY ./ ./
-RUN cargo build --release
+RUN cargo build --release --locked
 
 FROM scratch AS runner
 COPY --from=builder /etc/ssl /etc/ssl
