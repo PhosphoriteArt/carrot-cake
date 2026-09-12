@@ -8,12 +8,13 @@ use anyhow::Context;
 use serenity::{
     Client,
     all::{
-        ChannelId, Color, CreateActionRow, CreateButton, CreateEmbed, CreateMessage, CurrentUser,
-        EditMessage, GatewayIntents, GetMessages, GuildInfo, GuildPagination, Http,
+        ActionRowComponent, ButtonKind, ChannelId, Color, ComponentType, CreateActionRow,
+        CreateButton, CreateEmbed, CreateMessage, CurrentUser, EditMessage, GatewayIntents,
+        GetMessages, GuildInfo, GuildPagination, Http, Message, MessageId,
     },
 };
 use tokio::select;
-use twitch_api::helix::streams::Stream;
+use twitch_api::{helix::streams::Stream, types::StreamId};
 
 use crate::{
     config::BY_GUILD_ID,
@@ -169,12 +170,12 @@ impl InnerConnection {
         }
     }
 
-    async fn update_stream_for_channel(
+    async fn get_last_message_for(
         &self,
         channel: &ChannelId,
         notif: &Notification,
-    ) -> anyhow::Result<&'static str> {
-        let last_info = channel
+    ) -> anyhow::Result<Option<(MessageId, StreamId)>> {
+        Ok(channel
             .messages(self.client.deref(), GetMessages::new().limit(50))
             .await?
             .into_iter()
@@ -182,30 +183,29 @@ impl InnerConnection {
                 if f.author.id != self.user.id {
                     None
                 } else {
-                    f.embeds
-                        .into_iter()
-                        .find_map(|e| {
-                            e.url
-                                .and_then(|u| reqwest::Url::parse(u.as_str()).ok())
-                                .and_then(|u| {
-                                    u.query_pairs().find_map(|(a, b)| {
-                                        if a == "_bb_id" {
-                                            Some(b.into_owned())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                })
-                        })
-                        .map(|stream_id| (f.id, stream_id))
+                    if let Some(id) = get_stream_id(&f)
+                        && id == notif.stream().id
+                    {
+                        Some((f.id, id))
+                    } else {
+                        None
+                    }
                 }
             })
-            .next();
+            .next())
+    }
+
+    async fn update_stream_for_channel(
+        &self,
+        channel: &ChannelId,
+        notif: &Notification,
+    ) -> anyhow::Result<&'static str> {
+        let last_info = self.get_last_message_for(channel, notif).await?;
 
         match notif {
             Notification::Online(stream) | Notification::Update(stream) => {
                 if let Some((message, stream_id)) = last_info
-                    && stream.id.to_string() == stream_id
+                    && stream.id == stream_id
                 {
                     channel
                         .edit_message(
@@ -233,7 +233,7 @@ impl InnerConnection {
             }
             Notification::Offline(stream) => {
                 if let Some((message, stream_id)) = last_info
-                    && stream.id.to_string() == stream_id
+                    && stream.id == stream_id
                 {
                     channel
                         .edit_message(
@@ -273,7 +273,7 @@ fn vod_components(stream: &Stream) -> Vec<CreateActionRow> {
 }
 
 fn vod_button(stream: &Stream) -> CreateButton {
-    CreateButton::new_link(format!("https://twitch.tv/{}", stream.user_login))
+    CreateButton::new_link(format!("https://twitch.tv/videos/{}", stream.id))
         .label("Watch the VOD!")
 }
 
@@ -296,4 +296,30 @@ fn stream_embed(stream: &Stream) -> CreateEmbed {
             stream.game_name.clone()
         })
         .url(format!("https://twitch.tv/{}", stream.user_login))
+}
+
+fn get_stream_id(msg: &Message) -> Option<StreamId> {
+    msg.components
+        .iter()
+        .flat_map(|c| {
+            if matches!(c.kind, ComponentType::Button) {
+                c.components.iter()
+            } else {
+                [].iter()
+            }
+        })
+        .find_map(|c| {
+            let ActionRowComponent::Button(b) = c else {
+                return None;
+            };
+            let ButtonKind::Link { url } = &b.data else {
+                return None;
+            };
+            if !url.starts_with("https://twitch.tv/videos/") {
+                return None;
+            };
+            let id = &url["https://twitch.tv/videos/".len()..];
+
+            StreamId::try_from(id).ok()
+        })
 }
