@@ -20,7 +20,7 @@ Carrot Cake is meant to be self-hosted; that said:
 * (Optional) The role ID you want the bot to ping. [Instructions here](docs/HOW_TO_DISCORD.md#find-various-ids)
 
 ### Running it as an app on your computer
-* Download the most recent binary from releases [(or build it yourself from source)](#building-from-source)
+* Download the most recent binary from [releases](https://github.com/PhosphoriteArt/carrot-cake/releases) ([or build it yourself from source](#building-from-source))
 * Place the binary in a folder of your choice
 * Create a new text file called `secrets.env` and put the following in it, replacing the placeholders:
 
