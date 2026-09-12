@@ -1,0 +1,41 @@
+services:
+  carrot-cake:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      tags:
+        - phosphoriteart/carrot-cake:latest
+        - phosphoriteart/carrot-cake:${VERSION:-unversioned}
+        - phosphoriteart/carrot-cake:${GIT_SHA:-unknown}
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    env_file:
+      - .env
+    networks:
+      - telemetry
+      - cc-net
+    stop_signal: SIGINT
+    volumes:
+      - ${PWD}/config.yaml:/app/config.yaml:ro
+    environment:
+      - "OTEL_EXPORTER_OTLP_ENDPOINT=http://otel:4318"
+      - "OTEL_ENABLED=true"
+  otel:
+    image: otel/opentelemetry-collector-contrib:0.160.0
+    env_file:
+      - .env.otel
+    profiles:
+      - with-telemetry
+    volumes:
+      - ${PWD}/collector.yaml:/etc/collector.yaml:ro
+    command:
+      - '--config=file:/etc/collector.yaml'
+    networks:
+      - telemetry
+      - otel-net
+networks:
+  telemetry:
+    internal: true
+  otel-net:
+  cc-net:

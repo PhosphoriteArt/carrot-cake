@@ -56,12 +56,9 @@ impl Deref for DiscordConnection {
 
 impl DiscordConnection {
     pub async fn new(token: String, bcids: HashMap<UserId, Channel>) -> anyhow::Result<Self> {
-        let mut discord_client = Client::builder(
-            &token,
-            GatewayIntents::from_bits_retain(84992).union(GatewayIntents::MESSAGE_CONTENT),
-        )
-        .await
-        .context("Err creating client")?;
+        let mut discord_client = Client::builder(&token, GatewayIntents::from_bits_retain(84992))
+            .await
+            .context("Err creating client")?;
 
         let user = discord_client.http.get_current_user().await?;
 
@@ -317,7 +314,7 @@ fn headline_streaming(ping: Option<&str>, stream: &Stream) -> String {
     format!(
         "{}**{}** is streaming! :tada: ",
         if let Some(ping) = ping {
-            ping.to_owned() + ", "
+            format!("<{}>, ", ping)
         } else {
             "".to_owned()
         },

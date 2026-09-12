@@ -1,2 +1,4 @@
 /target
-.env
+*.env*
+*.yaml
+!docker-compose.yaml
