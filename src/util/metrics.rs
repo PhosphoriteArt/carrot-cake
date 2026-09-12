@@ -1,3 +1,4 @@
+//! Otel metrics initialization & helpers
 use std::{env, sync::Arc};
 
 use lazy_static::lazy_static;
@@ -33,58 +34,7 @@ lazy_static! {
 }
 
 pub async fn init() -> anyhow::Result<Box<dyn FnOnce()>> {
-    if env::var("OTEL_ENABLED").is_ok() {
-        let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_http()
-            .build()?;
-        let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-            .with_resource(Resource::builder().with_service_name("carrot_cake").build())
-            .with_batch_exporter(otlp_exporter)
-            .build();
-
-        let oltp_exporter_metrics = opentelemetry_otlp::MetricExporter::builder()
-            .with_http()
-            .build()?;
-        let metrics_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-            .with_resource(Resource::builder().with_service_name("carrot_cake").build())
-            .with_periodic_exporter(oltp_exporter_metrics)
-            .build();
-
-        let oltp_exporter_logs = opentelemetry_otlp::LogExporter::builder()
-            .with_http()
-            .build()?;
-        let logs_provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
-            .with_resource(Resource::builder().with_service_name("carrot_cake").build())
-            .with_batch_exporter(oltp_exporter_logs)
-            .build();
-        let bridge = OpenTelemetryTracingBridge::new(&logs_provider);
-
-        global::set_tracer_provider(tracer_provider.clone());
-        global::set_meter_provider(metrics_provider.clone());
-
-        let tracer = tracer_provider.tracer("carrot_cake");
-        let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-        tracing_subscriber::Registry::default()
-            .with(telemetry)
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_filter(EnvFilter::new("info,carrot_cake::twitch=trace")),
-            )
-            .with(bridge.with_filter(EnvFilter::new("info,carrot_cake::twitch=trace")))
-            .try_init()?;
-
-        Ok(Box::new(move || {
-            if let Err(e) = tracer_provider.shutdown() {
-                log::error!("error shutting down tracer_provider: {e}");
-            }
-            if let Err(e) = metrics_provider.shutdown() {
-                log::error!("error shutting down metrics_provider: {e}");
-            }
-            if let Err(e) = logs_provider.shutdown() {
-                log::error!("error shutting down logs_provider: {e}");
-            }
-        }))
-    } else {
+    if env::var("OTEL_ENABLED").is_err() {
         tracing_subscriber::Registry::default()
             .with(
                 tracing_subscriber::fmt::layer()
@@ -92,10 +42,61 @@ pub async fn init() -> anyhow::Result<Box<dyn FnOnce()>> {
             )
             .try_init()?;
 
-        Ok(Box::new(move || {
+        return Ok(Box::new(move || {
             // Do nothing
-        }))
+        }));
     }
+
+    let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .build()?;
+    let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_resource(Resource::builder().with_service_name("carrot_cake").build())
+        .with_batch_exporter(otlp_exporter)
+        .build();
+
+    let oltp_exporter_metrics = opentelemetry_otlp::MetricExporter::builder()
+        .with_http()
+        .build()?;
+    let metrics_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+        .with_resource(Resource::builder().with_service_name("carrot_cake").build())
+        .with_periodic_exporter(oltp_exporter_metrics)
+        .build();
+
+    let oltp_exporter_logs = opentelemetry_otlp::LogExporter::builder()
+        .with_http()
+        .build()?;
+    let logs_provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
+        .with_resource(Resource::builder().with_service_name("carrot_cake").build())
+        .with_batch_exporter(oltp_exporter_logs)
+        .build();
+    let bridge = OpenTelemetryTracingBridge::new(&logs_provider);
+
+    global::set_tracer_provider(tracer_provider.clone());
+    global::set_meter_provider(metrics_provider.clone());
+
+    let tracer = tracer_provider.tracer("carrot_cake");
+    let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+    tracing_subscriber::Registry::default()
+        .with(telemetry)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_filter(EnvFilter::new("info,carrot_cake::twitch=trace")),
+        )
+        .with(bridge.with_filter(EnvFilter::new("info,carrot_cake::twitch=trace")))
+        .try_init()?;
+
+    Ok(Box::new(move || {
+        if let Err(e) = tracer_provider.shutdown() {
+            log::error!("error shutting down tracer_provider: {e}");
+        }
+        if let Err(e) = metrics_provider.shutdown() {
+            log::error!("error shutting down metrics_provider: {e}");
+        }
+        if let Err(e) = logs_provider.shutdown() {
+            log::error!("error shutting down logs_provider: {e}");
+        }
+    }))
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +112,8 @@ pub fn client() -> TracedHttpClient {
     ))
 }
 
+// Basically copy-pasted from twitch_api's internal impl,
+// but uses the instrumented client.
 impl twitch_api::HttpClient for TracedHttpClient {
     type Error = reqwest_middleware::Error;
 

@@ -16,6 +16,8 @@ lazy_static! {
         derive_by_guild_id();
 }
 
+// Computes a reverse mapping form the config so individual guilds can easily look up
+// what they need in order to deliver notifications for the right streamers to the right channels
 fn derive_by_guild_id() -> HashMap<GuildId, HashMap<String, HashMap<ChannelId, Option<String>>>> {
     let mut map: HashMap<GuildId, HashMap<String, HashMap<ChannelId, Option<String>>>> =
         HashMap::new();

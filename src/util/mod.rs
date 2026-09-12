@@ -4,14 +4,18 @@ use tokio::sync::Notify;
 
 pub(crate) mod metrics;
 
-struct SyncEventInner {
-    notify: Notify,
-    flag: AtomicBool,
-}
 
+// Defines a synchronization primitive like Python's asyncio.Event –
+// single flag that can be set at most once, which releases all waiters.
+// Waiters that try to wait after the flag is set don't block at all.
 #[derive(Clone)]
 pub struct SyncEvent {
     inner: Arc<SyncEventInner>,
+}
+
+struct SyncEventInner {
+    notify: Notify,
+    flag: AtomicBool,
 }
 
 impl SyncEvent {

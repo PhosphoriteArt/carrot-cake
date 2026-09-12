@@ -1,3 +1,5 @@
+//! Initialization & setup for Twitch integration
+
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -43,7 +45,7 @@ impl Deref for OnlineClient {
 }
 
 impl OnlineClient {
-    #[tracing::instrument]
+    #[tracing::instrument(name = "OnlineClient::new")]
     pub async fn new<S: ToString>(
         client_id: impl Into<ClientId> + Clone + Debug,
         client_secret: impl Into<ClientSecret> + Clone + Debug,
@@ -59,6 +61,9 @@ impl OnlineClient {
             )
             .await?;
 
+        // Twitch has a limit of how many conduits that can be defined
+        // at one time; since we are the only user of our own conduits,
+        // find and delete any leftovers from e.g. a previous crash
         match twitch_client.get_conduits(&token).await {
             Ok(conduits) => {
                 let futs = conduits.into_iter().map(|cond| {
@@ -85,8 +90,11 @@ impl OnlineClient {
                 log::warn!("Error getting conduits: {e}")
             }
         }
+        // ...then recreate a single-sharded conduit for webhook delivery
         let conduit = twitch_client.create_conduit(1, &token).await?;
 
+        // find the channels for the given usernames; events
+        // have to be subscribed by channel ID.
         let streamers = join_all(streamers.map(|username| {
             let twitch_client = twitch_client.clone();
             let token = token.clone();
@@ -133,6 +141,7 @@ impl OnlineClient {
             }),
         };
 
+        // Kickstart all our background tasks
         client.run_websocket().await?;
         client.inner.clone().start_prune().await;
         client.inner.clone().start_live_refresh_sync().await;
@@ -143,10 +152,12 @@ impl OnlineClient {
         Ok(client)
     }
 
+    // returns a listener for the events we're pushing out
     pub fn handle(&self) -> broadcast::Receiver<Notification> {
         self.inner.cast.subscribe()
     }
 
+    // Indicate that we're closing out and wait for our background tasks to finish.
     pub async fn close(&self) {
         self.inner.close.signal().await;
         self.inner.ws_closed.wait().await;
