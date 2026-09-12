@@ -1,3 +1,12 @@
+//! Twitch websocket event handler.
+//!
+//! Twitch tries really hard to keep at-least-once event delivery even during
+//! backend pod rolls / maintenance / etc... so they require the client support
+//! doing this little dance where old Socket A is told it's about to terminate
+//! and to reconnect using a special session identifier; during this time, we
+//! are asked to create new Socket B with ^^, wait for its Welcome message,
+//! then disconnect gracefully Socket A. Most of the logic here is around making
+//! sure we handle this + our own disconnectinos gracefully.
 use std::{
     sync::{
         Arc, Mutex,
@@ -6,6 +15,7 @@ use std::{
     time::{self, Duration, Instant},
 };
 
+use chrono::{DateTime, TimeDelta, Utc};
 use serenity::futures::{StreamExt, future::join_all};
 use tokio::{sync::mpsc, time::timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -21,6 +31,7 @@ use crate::{
     },
 };
 
+// Manages the aforementioned dance
 pub struct WebsocketRunner {
     close: SyncEvent,
     inner: Arc<InnerOnlineClient>,
@@ -31,11 +42,12 @@ impl WebsocketRunner {
         Self { close, inner }
     }
 
+    // Only returns when self.close is set.
     #[tracing::instrument(skip(self))]
     pub async fn run(self) {
         let mut id = 1u16;
         let (reconnect_tx, mut reconnect_rx) = mpsc::channel::<(String, bool)>(1);
-        let mut one = Arc::new(WebsocketConnection {
+        let mut primary = Arc::new(WebsocketConnection {
             url: twitch_ws_url(),
             inner: self.inner.clone(),
             reconnect: reconnect_tx.clone(),
@@ -48,7 +60,7 @@ impl WebsocketRunner {
             id,
         });
         id += 1;
-        let runner = one.clone();
+        let runner = primary.clone();
 
         let mut ws_closed = SyncEvent::new();
         let ws_inner = ws_closed.clone();
@@ -62,11 +74,11 @@ impl WebsocketRunner {
             tokio::select! {
                 biased;
                 _ = self.close.wait() => {
-                  break;
+                    break;
                 }
                 Some((reconnect_url, is_reconnect)) = reconnect_rx.recv() => {
                     log::info!("Received reconnect for {reconnect_url}");
-                    let two = Arc::new(WebsocketConnection {
+                    let replacement = Arc::new(WebsocketConnection {
                         url: reconnect_url,
                         inner: self.inner.clone(),
                         reconnect: reconnect_tx.clone(),
@@ -79,11 +91,11 @@ impl WebsocketRunner {
                         id
                     });
                     id += 1;
-                    let runner = two.clone();
+                    let runner = replacement.clone();
                     ws_closed.signal().await;
                     ws_closed = SyncEvent::new();
                     let ws_inner = ws_closed.clone();
-                    let two_handle = tokio::spawn(async move {
+                    let replacement_handle = tokio::spawn(async move {
                         runner.run_websocket_inner().await;
                         ws_inner.signal().await
                     });
@@ -94,7 +106,7 @@ impl WebsocketRunner {
                             log::warn!("closed while waiting for disconnect");
                             break;
                         }
-                        _ = two.welcome_gate.wait() => {
+                        _ = replacement.welcome_gate.wait() => {
                             // OK
                         }
                         _ = ws_closed.wait() => {
@@ -104,14 +116,14 @@ impl WebsocketRunner {
                     }
 
                     log::debug!("[Reconnect] Signalling for 1st to shutdown...");
-                    one.next_gate.signal().await;
+                    primary.next_gate.signal().await;
                     log::debug!("[Reconnect] Waiting for 1st to shutdown...");
                     if let Err(e) = timeout(Duration::from_mins(5), handle).await {
-                    log::error!("Failed to await handle? {e:?}")
+                        log::error!("Failed to await handle? {e:?}")
                     }
                     log::debug!("[Reconnect] Complete");
-                    handle = two_handle;
-                    one = two;
+                    handle = replacement_handle;
+                    primary = replacement;
                 }
 
                 _ = ws_closed.wait() => {
@@ -126,10 +138,10 @@ impl WebsocketRunner {
                 }
 
                 _ = tokio::time::sleep(Duration::from_secs(10)) => {
-                    if one.is_likely_dead() {
-                      // Closes the current one and acts as if we observed a closure later.
-                      log::warn!("Current connection looks dead!");
-                      one.next_gate.signal().await;
+                    if primary.is_likely_dead() {
+                        // Closes the current one and acts as if we observed a closure later.
+                        log::warn!("Current connection looks dead!");
+                        primary.next_gate.signal().await;
                     }
                 }
             }
@@ -137,6 +149,7 @@ impl WebsocketRunner {
     }
 }
 
+// Represents a single connection (which may be swapped out by Reconnect messages)
 struct WebsocketConnection {
     url: String,
     inner: Arc<InnerOnlineClient>,
@@ -153,6 +166,7 @@ struct WebsocketConnection {
 }
 
 impl WebsocketConnection {
+    // Last observed keepalive is far past when Twitch told us they'd send it
     fn is_likely_dead(&self) -> bool {
         let last = { *self.last_keepalive.lock().unwrap() };
         let Ok(keepalive) = self.keepalive.load(Ordering::Acquire).try_into() else {
@@ -186,11 +200,11 @@ impl WebsocketConnection {
         while !self.close.is_set() {
             let Some(next) = (tokio::select! {
                 biased;
-                frame = ws_stream.next() => {
-                    frame
-                }
                 _ = self.close.wait() => {
                     return
+                }
+                frame = ws_stream.next() => {
+                    frame
                 }
                 _ = self.next_gate.wait() => {
                     return
@@ -239,7 +253,7 @@ impl WebsocketConnection {
 
                 self.handle_event_data(parsed).await
             }
-            Message::Binary(_) => unimplemented!(),
+            Message::Binary(_) => bail!("Got binary message, but we don't support that"),
             Message::Ping(_) | Message::Pong(_) => Ok(true),
             Message::Close(close_frame) => {
                 bail!(
@@ -257,6 +271,10 @@ impl WebsocketConnection {
     async fn handle_event_data(&self, parsed: EventsubWebsocketData<'_>) -> anyhow::Result<bool> {
         log::debug!("[WS:T] Got message");
         increment!(TWITCH_MSG_RECEIVED; "msg_type": twitch_msg_type(&parsed));
+
+        if is_old(&parsed) {
+            bail!("Incoming message was too old to process.")
+        }
 
         match parsed {
             EventsubWebsocketData::Welcome {
@@ -435,4 +453,36 @@ fn twitch_msg_type(message: &EventsubWebsocketData<'_>) -> &'static str {
         } => "EventsubWebsocketData::Reconnect",
         _ => "unknown",
     }
+}
+
+fn is_old(message: &EventsubWebsocketData<'_>) -> bool {
+    let timestamp = match message {
+        EventsubWebsocketData::Welcome {
+            metadata,
+            payload: _,
+        } => &metadata.message_timestamp,
+        EventsubWebsocketData::Keepalive {
+            metadata,
+            payload: _,
+        } => &metadata.message_timestamp,
+        EventsubWebsocketData::Notification {
+            metadata,
+            payload: _,
+        } => &metadata.message_timestamp,
+        EventsubWebsocketData::Revocation {
+            metadata,
+            payload: _,
+        } => &metadata.message_timestamp,
+        EventsubWebsocketData::Reconnect {
+            metadata,
+            payload: _,
+        } => &metadata.message_timestamp,
+        _ => return false,
+    };
+
+    let Ok(dt) = DateTime::parse_from_rfc3339(timestamp.as_str()) else {
+        return false;
+    };
+
+    return Utc::now().signed_duration_since(dt) > TimeDelta::minutes(10);
 }

@@ -1,9 +1,5 @@
 use std::env;
 
-use ansi_term::{
-    Color::{Black, Yellow},
-    Style,
-};
 use tokio::signal;
 
 use crate::{
@@ -27,12 +23,13 @@ async fn main() -> anyhow::Result<()> {
 
     let shutdown = metrics::init().await?;
 
-    // Ensure config valid
+    // Ensure config valid as early as possible
     let _ = BY_GUILD_ID;
 
     let twitch_client_id = env::var("CLIENT_ID").expect("Expected a token in the environment");
     let twitch_client_secret =
         env::var("CLIENT_SECRET").expect("Expected a token in the environment");
+    let discord_token = env::var("BOT_TOKEN").expect("Expected a token in the environment");
 
     let olwatcher = OnlineClient::new(
         twitch_client_id,
@@ -42,12 +39,11 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     let mut recv = olwatcher.handle();
 
-    let discord_token = env::var("BOT_TOKEN").expect("Expected a token in the environment");
-
     let discord_client =
         DiscordConnection::new(discord_token, olwatcher.broadcaster_ids.clone()).await?;
     let cpy = discord_client.clone();
 
+    // Shutdown watcher
     tokio::spawn(async move {
         signal::ctrl_c().await.expect("failed to listen to ctrl-c");
         log::warn!("ctrl-c found, shutting down...");
@@ -58,11 +54,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     while let Ok(evt) = recv.recv().await {
-        println!(
-            "{} {}",
-            Style::new().on(Yellow).fg(Black).bold().paint("EVT!!!"),
-            Style::new().italic().paint(format!("{evt:?}"))
-        );
+        log::info!("Got twitch event: {evt:?}");
         if let Err(e) = discord_client.update_stream(evt).await {
             log::error!("Error updating discord: {e}")
         }

@@ -1,3 +1,11 @@
+//! Manages updating / pinging in discord.
+//! 
+//! We're a bit sneaky here; we don't want to use a database to remember
+//! where and how we've written messages, but we don't want to accidentally
+//! ping multiple times about a stream. So... we use Discord as our database >:)
+//! I hide the stream ID that the notification was for as a query parameter in
+//! the game thumbnail URL; then before writing, we search for a message to edit,
+//! matching on that stream ID to figure out if this is a new stream or not.
 use std::{
     collections::HashMap,
     ops::Deref,
@@ -107,6 +115,7 @@ impl DiscordConnection {
 }
 
 impl InnerConnection {
+    // If we join a new guild, we should know about it.
     async fn periodically_resync_guilds(self: Arc<Self>) {
         tokio::spawn(async move {
             loop {

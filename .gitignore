@@ -2,3 +2,4 @@
 *.env*
 *.yaml
 !docker-compose.yaml
+.DS_Store

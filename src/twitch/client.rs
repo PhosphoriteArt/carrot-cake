@@ -56,6 +56,9 @@ pub struct InnerOnlineClient {
     pub full_sync_closed: SyncEvent,
     pub prune_closed: SyncEvent,
 
+    // Twitch doesn't guarantee exactly-once events,
+    // and asks to deduplicate events by event ID, and ignore events
+    // older than 10min. We prune this map in the background every 10min.
     pub seen: Mutex<HashMap<String, time::Instant>>,
 
     pub state: Mutex<HashMap<UserId, (Stream, Option<Video>)>>,
@@ -119,6 +122,8 @@ impl InnerOnlineClient {
         Ok(())
     }
 
+    // We periodically sync just in case we miss an event or if we crashed
+    // and need to rehydrate state.
     pub async fn start_full_refresh_sync(self: Arc<InnerOnlineClient>) {
         tokio::spawn(async move {
             loop {
@@ -139,6 +144,8 @@ impl InnerOnlineClient {
         });
     }
 
+    // Sync more often for folks who are live so we also capture metadata
+    // updates like if they change their title or game
     pub async fn start_live_refresh_sync(self: Arc<InnerOnlineClient>) {
         tokio::spawn(async move {
             loop {
@@ -196,6 +203,7 @@ impl InnerOnlineClient {
                 let next = next?;
                 observed.insert(next.user_id.clone());
 
+                // Find the most recent video to use for the VOD link
                 let video = self
                     .client
                     .req_get(
@@ -233,6 +241,11 @@ impl InnerOnlineClient {
             observed
         };
 
+        // Anyone not returned in the above search is no longer live
+        // WONTFIX: If we crash while someone is online, then they go offline,
+        //          we'll miss sending an update about it. (Fixing this would
+        //          require introducing persistent storage and I don't want to
+        //          do that for the scope of this app)
         for uid in keys {
             if !observed.contains(&uid) {
                 let mut state = self.state.lock().unwrap();
