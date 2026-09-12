@@ -1,5 +1,0 @@
-streams:
-  - streamer_login: phosphoriteart
-    notify:
-      - guild_id: "1059245435954397264"
-        channel_id: "1059245436755521598"

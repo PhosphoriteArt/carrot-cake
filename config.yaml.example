@@ -1,0 +1,6 @@
+streams:
+  - streamer_login: jdkulatest123
+    notify:
+      - guild_id: "1059245435954397264"
+        channel_id: "1059245436755521598"
+        ping: "@146460164915068928"

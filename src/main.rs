@@ -20,15 +20,12 @@ pub(crate) mod util;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let shutdown = metrics::init().await?;
-
-    log::error!("Hello Error!");
-    log::warn!("Hello Warn!");
-    log::info!("Hello Info!");
-    log::debug!("Hello Debug!");
     if cfg!(feature = "dev") {
         let _ = dotenv::dotenv();
+        let _ = dotenv::from_filename("secret.env");
     }
+
+    let shutdown = metrics::init().await?;
 
     // Ensure config valid
     let _ = BY_GUILD_ID;
