@@ -14,7 +14,7 @@ use serenity::futures::future::Either;
 use tracing_subscriber::{Layer, filter::EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 lazy_static! {
-    static ref _ROOT: Meter = global::meter("bunnybot");
+    static ref _ROOT: Meter = global::meter("carrot_cake");
     pub static ref WS_CONNECT: Counter<u64> = _ROOT.u64_counter("bb.twitch.ws.connect").build();
     pub static ref WS_ERROR: Counter<u64> = _ROOT.u64_counter("bb.twitch.ws.error").build();
     pub static ref WS_RECEIVED: Counter<u64> =
@@ -37,7 +37,7 @@ pub async fn init() -> anyhow::Result<impl FnOnce()> {
         .with_http()
         .build()?;
     let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-        .with_resource(Resource::builder().with_service_name("bunnybot").build())
+        .with_resource(Resource::builder().with_service_name("carrot_cake").build())
         .with_batch_exporter(otlp_exporter)
         .build();
 
@@ -45,7 +45,7 @@ pub async fn init() -> anyhow::Result<impl FnOnce()> {
         .with_http()
         .build()?;
     let metrics_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-        .with_resource(Resource::builder().with_service_name("bunnybot").build())
+        .with_resource(Resource::builder().with_service_name("carrot_cake").build())
         .with_periodic_exporter(oltp_exporter_metrics)
         .build();
 
@@ -53,7 +53,7 @@ pub async fn init() -> anyhow::Result<impl FnOnce()> {
         .with_http()
         .build()?;
     let logs_provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
-        .with_resource(Resource::builder().with_service_name("bunnybot").build())
+        .with_resource(Resource::builder().with_service_name("carrot_cake").build())
         .with_batch_exporter(oltp_exporter_logs)
         .build();
     let bridge = OpenTelemetryTracingBridge::new(&logs_provider);
@@ -61,15 +61,15 @@ pub async fn init() -> anyhow::Result<impl FnOnce()> {
     global::set_tracer_provider(tracer_provider.clone());
     global::set_meter_provider(metrics_provider.clone());
 
-    let tracer = tracer_provider.tracer("bunnybot");
+    let tracer = tracer_provider.tracer("carrot_cake");
     let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
     tracing_subscriber::Registry::default()
         .with(telemetry)
         .with(
             tracing_subscriber::fmt::layer()
-                .with_filter(EnvFilter::new("info,bunnybot::twitch=trace")),
+                .with_filter(EnvFilter::new("info,carrot_cake::twitch=trace")),
         )
-        .with(bridge.with_filter(EnvFilter::new("info,bunnybot::twitch=trace")))
+        .with(bridge.with_filter(EnvFilter::new("info,carrot_cake::twitch=trace")))
         .try_init()?;
 
     Ok(move || {

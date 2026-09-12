@@ -159,38 +159,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
-name = "bunnybot"
-version = "0.1.0"
-dependencies = [
- "ansi_term",
- "anyhow",
- "async-trait",
- "dotenv",
- "futures-core",
- "futures-sink",
- "http",
- "lazy_static",
- "log",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "reqwest 0.13.5",
- "reqwest-middleware",
- "reqwest-tracing",
- "scopeguard",
- "serenity",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tracing",
- "tracing-log",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "twitch_api",
- "uuid",
-]
-
-[[package]]
 name = "bytecount"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -237,6 +205,38 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "carrot_cake"
+version = "0.1.0"
+dependencies = [
+ "ansi_term",
+ "anyhow",
+ "async-trait",
+ "dotenv",
+ "futures-core",
+ "futures-sink",
+ "http",
+ "lazy_static",
+ "log",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "reqwest 0.13.5",
+ "reqwest-middleware",
+ "reqwest-tracing",
+ "scopeguard",
+ "serenity",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "tracing-log",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "twitch_api",
+ "uuid",
 ]
 
 [[package]]
