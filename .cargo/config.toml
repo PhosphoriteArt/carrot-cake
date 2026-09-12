@@ -1,2 +1,3 @@
 [build]
+target = "host-tuple"
 rustflags = ["-C", "target-feature=+crt-static"]
