@@ -8,6 +8,6 @@ RUN cargo build --release --locked
 FROM scratch AS runner
 COPY --from=builder /etc/ssl /etc/ssl
 WORKDIR /app
-COPY --from=builder /build/target/release/carrot_cake ./carrot_cake
+COPY --from=builder /build/target/*/release/carrot_cake ./carrot_cake
 STOPSIGNAL SIGINT
 ENTRYPOINT [ "/app/carrot_cake" ]
