@@ -1,5 +1,5 @@
 //! Manages updating / pinging in discord.
-//! 
+//!
 //! We're a bit sneaky here; we don't want to use a database to remember
 //! where and how we've written messages, but we don't want to accidentally
 //! ping multiple times about a stream. So... we use Discord as our database >:)
@@ -58,7 +58,7 @@ impl Deref for DiscordConnection {
     type Target = InnerConnection;
 
     fn deref(&self) -> &Self::Target {
-        return self.inner.deref();
+        self.inner.deref()
     }
 }
 
@@ -76,7 +76,7 @@ impl DiscordConnection {
                 close: SyncEvent::new(),
                 guilds: Mutex::new(vec![]),
                 user,
-                bcids: bcids,
+                bcids,
                 closed_periodic_resync: SyncEvent::new(),
                 closed_discord_client: SyncEvent::new(),
             }),
@@ -143,7 +143,7 @@ impl InnerConnection {
             let next = self
                 .client
                 .get_guilds(
-                    guilds.last().map(|g| GuildPagination::After(g.id.clone())),
+                    guilds.last().map(|g| GuildPagination::After(g.id)),
                     Some(100),
                 )
                 .await?;
@@ -253,13 +253,13 @@ impl InnerConnection {
                             self.client.deref(),
                             message,
                             EditMessage::new()
-                                .content(headline_streaming(ping, &stream))
+                                .content(headline_streaming(ping, stream))
                                 .add_embed(stream_embed(
-                                    &stream,
+                                    stream,
                                     false,
                                     self.bcids.get(&stream.user_id),
                                 ))
-                                .components(streaming_components(&stream, video.as_ref())),
+                                .components(streaming_components(stream, video.as_ref())),
                         )
                         .await?;
                     Ok("edit")
@@ -268,13 +268,13 @@ impl InnerConnection {
                         .send_message(
                             self.client.deref(),
                             CreateMessage::new()
-                                .content(headline_streaming(ping, &stream))
+                                .content(headline_streaming(ping, stream))
                                 .add_embed(stream_embed(
-                                    &stream,
+                                    stream,
                                     false,
                                     self.bcids.get(&stream.user_id),
                                 ))
-                                .components(streaming_components(&stream, video.as_ref())),
+                                .components(streaming_components(stream, video.as_ref())),
                         )
                         .await?;
                     Ok("new")
@@ -287,9 +287,9 @@ impl InnerConnection {
                     channel
                         .edit_message(self.client.deref(), message, {
                             let mut msg = EditMessage::new()
-                                .content(headline_vod(ping, &stream))
+                                .content(headline_vod(ping, stream))
                                 .add_embed(stream_embed(
-                                    &stream,
+                                    stream,
                                     true,
                                     self.bcids.get(&stream.user_id),
                                 ));
@@ -333,7 +333,7 @@ fn headline_streaming(ping: Option<&str>, stream: &Stream) -> String {
 
 fn streaming_components(stream: &Stream, video: Option<&Video>) -> Vec<CreateActionRow> {
     vec![CreateActionRow::Buttons(
-        [Some(stream_button(stream)), video.map(|v| vod_button(v))]
+        [Some(stream_button(stream)), video.map(vod_button)]
             .into_iter()
             .flatten()
             .collect(),
@@ -362,7 +362,7 @@ fn stream_embed(stream: &Stream, offline: bool, chan: Option<&Channel>) -> Creat
         }),
         Some(("**Viewers**", stream.viewer_count.to_string(), true)),
         (if offline
-            && let Ok(dt) = DateTime::parse_from_rfc3339(&stream.started_at.to_string())
+            && let Ok(dt) = DateTime::parse_from_rfc3339(stream.started_at.as_ref())
             && let Ok(duration) = dt.signed_duration_since(Utc::now()).to_std()
         {
             Some((
@@ -425,13 +425,10 @@ fn get_stream_id(msg: &Message) -> Option<StreamId> {
         let Ok(url) = reqwest::Url::parse(&thumb.url) else {
             return None;
         };
-        let Some(id) = url
+        let id = url
             .query_pairs()
-            .find_map(|(k, v)| if k == "_cc_id" { Some(v) } else { None })
-        else {
-            return None;
-        };
+            .find_map(|(k, v)| if k == "_cc_id" { Some(v) } else { None })?;
 
-        StreamId::try_from(id.to_string()).ok()
+        Some(StreamId::from(id.to_string()))
     })
 }
