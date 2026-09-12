@@ -311,7 +311,7 @@ fn headline_vod(ping: Option<&str>, stream: &Stream) -> String {
     format!(
         "{}**{}** streamed :projector:",
         if let Some(ping) = ping {
-            ping.to_owned() + ", "
+            format!("<{}>, ", ping)
         } else {
             "".to_owned()
         },
