@@ -31,7 +31,7 @@ CLIENT_SECRET="twitch client secret here"
 BOT_TOKEN="discord bot token here"
 ```
 
-* [Download `config.yaml.example`](x) and place it next to `secrets.env`. Rename it to `config.yaml` and edit it to your liking:
+* [Download `config.yaml.example`](https://raw.githubusercontent.com/PhosphoriteArt/carrot-cake/refs/heads/main/config.yaml.example) and place it next to `secrets.env`. Rename it to `config.yaml` and edit it to your liking:
 
 ```yaml
 streams:
@@ -74,7 +74,7 @@ services:
 
 Carrot Cake is pretty thoroughly instrumented with OpenTelemetry. When enabled with `OTEL_ENABLED=true`, it will try to send it to an otel collector running locally on port 4318, the default.
 
-You can look at the `docker-compose.yaml` file in the repo if you want to see what that might look like!
+You can look at the [`docker-compose.yaml` file in the repo](https://github.com/PhosphoriteArt/carrot-cake/blob/main/docker-compose.yaml) if you want to see what that might look like!
 
 ## Building from Source
 
