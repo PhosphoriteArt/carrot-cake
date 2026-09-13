@@ -47,7 +47,7 @@ impl Deref for OnlineClient {
 
 impl OnlineClient {
     #[allow(clippy::type_complexity)]
-    #[tracing::instrument(name = "OnlineClient::new")]
+    #[tracing::instrument(skip(client_secret), name = "OnlineClient::new")]
     pub async fn new<S: ToString>(
         client_id: impl Into<ClientId> + Clone + Debug,
         client_secret: impl Into<ClientSecret> + Clone + Debug,
@@ -69,40 +69,6 @@ impl OnlineClient {
             )
             .await?;
 
-        // Twitch has a limit of how many conduits that can be defined
-        // at one time; since we are the only user of our own conduits,
-        // find and delete any leftovers from e.g. a previous crash
-        increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "get_conduits");
-        match twitch_client.get_conduits(&token).await {
-            Ok(conduits) => {
-                let futs = conduits.into_iter().map(|cond| {
-                    let c = twitch_client.clone();
-                    let tok = token.clone();
-                    tokio::spawn(
-                        async move {
-                            increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "delete_conduit");
-                            (c.delete_conduit(cond.id.clone(), &tok).await, cond.id)
-                        },
-                    )
-                });
-                let results = join_all(futs).await;
-                for result in results {
-                    match result {
-                        Ok((inner, id)) => match inner {
-                            Ok(_) => {
-                                log::info!("deleted conduit {id}")
-                            }
-                            Err(err) => log::warn!("err deleting conduit {id}: {err}"),
-                        },
-                        Err(err) => log::warn!("err with conduit task: {err}"),
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!("Error getting conduits: {e}")
-            }
-        }
-        // ...then recreate a single-sharded conduit for webhook delivery
         increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "create_conduit");
         let conduit = twitch_client.create_conduit(1, &token).await?;
 
@@ -177,6 +143,25 @@ impl OnlineClient {
         self.live_sync_closed.wait().await;
         self.full_sync_closed.wait().await;
         self.prune_closed.wait().await;
+        let token = {
+            let Ok(token) = self.curr_token.lock() else {
+                return;
+            };
+            token.clone()
+        };
+
+        if let Err(e) = self
+            .client
+            .delete_conduit(self.conduit_id.clone(), &token.clone())
+            .await
+        {
+            log::error!(
+                "Could not clean up conduit {} at shutdown: {e}",
+                self.conduit_id.as_str()
+            )
+        } else {
+            log::info!("Cleaned up conduit {} ", self.conduit_id.as_str())
+        }
     }
 
     #[tracing::instrument(skip(self))]

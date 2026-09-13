@@ -21,7 +21,7 @@ pub(crate) mod util;
 async fn main() -> anyhow::Result<()> {
     if cfg!(feature = "dev") {
         let _ = dotenv::dotenv();
-        let _ = dotenv::from_filename("secret.env");
+        let _ = dotenv::from_filename("secrets.env");
     }
 
     let shutdown = metrics::init().await?;

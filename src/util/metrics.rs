@@ -42,7 +42,7 @@ lazy_static! {
 }
 
 pub async fn init() -> anyhow::Result<Box<dyn FnOnce()>> {
-    if env::var("OTEL_ENABLED").is_err() {
+    if env::var("OTEL_ENABLED").map_or(true, |v| v != "true") {
         tracing_subscriber::Registry::default()
             .with(
                 tracing_subscriber::fmt::layer()
