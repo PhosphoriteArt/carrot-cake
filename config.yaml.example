@@ -4,3 +4,11 @@ streams:
       - guild_id: "1059245435954397264"
         channel_id: "1059245436755521598"
         ping: "@146460164915068928"
+
+        # We support the following format interpolations in curlies {...}:
+        # {game_name}, {viewer_count}, {started_at}, {user_name}, {user_login},
+        # {game_id}, {stream_id}, {stream_title}, {video_id}, {ping}
+        #
+        # {ping} will always use the correct ping format given your `ping` selection above.
+        format_online: "Hey {ping}! Guess who's streaming? That's right, {user_name}! Come on in!"
+        format_offline: "{username} was streaming earlier."

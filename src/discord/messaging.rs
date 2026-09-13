@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use chrono::{DateTime, FixedOffset, Utc};
+use serde::{Deserialize, Serialize};
 use serenity::all::{
     ChannelId, Color, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor,
     CreateEmbedFooter, Message, MessageId, Timestamp,
@@ -17,7 +18,7 @@ use crate::{
     discord::format::{DEFAULT_OFFLINE_FORMAT, DEFAULT_ONLINE_FORMAT, run_format},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct StreamNotifMessage {
     pub(super) channel_id: ChannelId,
     pub(super) message_id: MessageId,
@@ -68,7 +69,7 @@ impl TryFrom<Message> for StreamNotifMessage {
 
 // Stores everything we need to make our notifications happen.
 // Everything here should be re-derivable from the message itself!!
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct StreamInfo {
     pub(super) game_name: String,
     pub(super) viewer_count: usize,

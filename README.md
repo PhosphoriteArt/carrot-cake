@@ -76,6 +76,18 @@ Carrot Cake is pretty thoroughly instrumented with OpenTelemetry. When enabled w
 
 You can look at the [`docker-compose.yaml` file in the repo](https://github.com/PhosphoriteArt/carrot-cake/blob/main/docker-compose.yaml) if you want to see what that might look like!
 
+### Discord cache
+
+If your bot is colocated in a channel that has a lot of chatter, it may lose
+track of what it's posted if it restarts. If this is the case, you can set
+
+```env
+DISCORD_CACHE="path/to/cache.json"
+```
+
+in your `secrets.env` that will persist message it's sent for a given
+stream ID across restarts.
+
 ## Building from Source
 
 Download and install [rust](https://rust-lang.org/tools/install/); once that's done it should be a very straightforward

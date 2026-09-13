@@ -196,6 +196,7 @@ dependencies = [
  "reqwest-middleware",
  "reqwest-tracing",
  "serde",
+ "serde_json",
  "serenity",
  "tokio",
  "tokio-tungstenite 0.30.0",

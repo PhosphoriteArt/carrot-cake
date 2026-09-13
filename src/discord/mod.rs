@@ -8,12 +8,16 @@
 //! matching on that stream ID to figure out if this is a new stream or not.
 use std::{
     collections::{HashMap, HashSet},
+    env,
     ops::Deref,
+    path::PathBuf,
+    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use anyhow::{Context, bail};
+use chrono::{TimeDelta, Utc};
 use dashmap::{DashMap, DashSet, Entry};
 use serenity::{
     Client,
@@ -23,7 +27,7 @@ use serenity::{
     },
     futures::future::join_all,
 };
-use tokio::select;
+use tokio::{fs, select};
 use twitch_api::{
     helix::{search::Channel, streams::Stream, videos::Video},
     types::{StreamId, UserId},
@@ -86,6 +90,26 @@ impl DiscordConnection {
         increment!(EXTERNAL_CALLS; "service": "discord", "endpoint": "get_current_user");
         let user = discord_client.http.get_current_user().await?;
 
+        let cache = DashMap::new();
+        if let Ok(cache_path) = env::var("DISCORD_CACHE") {
+            match std::fs::OpenOptions::new().read(true).open(cache_path) {
+                Ok(file) => {
+                    let contents: Result<Vec<((ChannelId, StreamId), StreamNotifMessage)>, _> =
+                        serde_json::from_reader(file);
+                    match contents {
+                        Ok(data) => {
+                            for (key, value) in data {
+                                cache.insert(key, value);
+                            }
+                            log::info!("Read back DISCORD_CACHE");
+                        }
+                        Err(e) => log::warn!("Couldn't read DISCORD_CACHE: {e}"),
+                    }
+                }
+                Err(e) => log::warn!("Couldn't open DISCORD_CACHE: {e}"),
+            }
+        }
+
         let client = Self {
             inner: Arc::new(InnerConnection {
                 client: discord_client.http.clone(),
@@ -95,7 +119,7 @@ impl DiscordConnection {
                 bcids,
                 closed_periodic_resync: SyncEvent::new(),
                 closed_discord_client: SyncEvent::new(),
-                message_cache: Arc::new(DashMap::new()),
+                message_cache: Arc::new(cache),
                 cache_ready_for_channel: Arc::new(DashSet::new()),
                 initial_reconciliation_finished: SyncEvent::new(),
                 initial_sync_complete: SyncEvent::new(),
@@ -285,10 +309,11 @@ impl InnerConnection {
             }
         }
 
-        for (stream_id, message) in self
+        let mut to_clear = HashSet::new();
+        for ((cid, stream_id), message) in self
             .message_cache
             .iter()
-            .map(|f| (f.key().1.clone(), f.value().clone()))
+            .map(|f| (f.key().clone(), f.value().clone()))
             .collect::<Vec<_>>()
         {
             if !seen.contains(&stream_id) {
@@ -298,9 +323,45 @@ impl InnerConnection {
                     log::warn!("Error setting offline message: {e}");
                 }
             }
+
+            if message.info.offline
+                && let ts = message.touched_timestamp().to_utc()
+                && Utc::now().signed_duration_since(ts) > TimeDelta::new(3600i64, 0).unwrap()
+            {
+                to_clear.insert((cid, stream_id));
+            }
+        }
+
+        for key in to_clear {
+            self.message_cache.remove(&key);
+        }
+
+        if let Ok(cache_path) = env::var("DISCORD_CACHE") {
+            if let Err(e) = self.dump_cache(&cache_path).await {
+                log::error!("Failed to write discord cache: {e}")
+            }
         }
 
         self.initial_reconciliation_finished.signal().await;
+        Ok(())
+    }
+
+    async fn dump_cache(&self, path: &str) -> anyhow::Result<()> {
+        let pb = PathBuf::from_str(path)?;
+        let tmp = pb.with_added_extension(".swp");
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(false)
+            .write(true)
+            .open(&tmp)?;
+
+        let content = self
+            .message_cache
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect::<Vec<_>>();
+        serde_json::to_writer(file, &content)?;
+        fs::rename(tmp, pb).await?;
         Ok(())
     }
 
@@ -484,8 +545,7 @@ impl InnerConnection {
             .find(|v| v.info.stream_id == notif.stream().id);
 
         if let Some(last_info) = last_info {
-            self.update_existing_message(&last_info, cfg, notif)
-                .await?;
+            self.update_existing_message(&last_info, cfg, notif).await?;
             Ok(true)
         } else {
             Ok(false)
