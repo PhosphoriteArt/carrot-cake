@@ -7,7 +7,7 @@ use std::str::FromStr;
 use std::{env, fs};
 
 lazy_static! {
-    pub static ref CONFIG: Config = serde_yaml::from_slice(
+    pub static ref CONFIG: Config = yaml_serde::from_slice(
         &fs::read(env::var("CONFIG_FILE").unwrap_or("./config.yaml".to_string()))
             .expect("failed to read file")
     )
