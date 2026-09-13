@@ -13,7 +13,7 @@ export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
 export CXX_aarch64_unknown_linux_musl=aarch64-linux-musl-g++
 export AR_aarch64_unknown_linux_musl=aarch64-linux-musl-ar
 
-mkdir dist
+mkdir -p dist
 
 cargo build --target aarch64-apple-darwin --target-dir dist/aarch64-apple-darwin --release --locked &
 cargo build --target aarch64-unknown-linux-musl --target-dir dist/aarch64-unknown-linux-musl --release --locked &
