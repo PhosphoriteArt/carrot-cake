@@ -1,6 +1,7 @@
 //! Otel metrics initialization & helpers
-use std::{env, sync::Arc};
+use std::{borrow::Cow, env, sync::Arc};
 
+use http::Extensions;
 use lazy_static::lazy_static;
 use opentelemetry::{
     global,
@@ -9,9 +10,15 @@ use opentelemetry::{
 };
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_sdk::Resource;
-use reqwest_middleware::ClientWithMiddleware;
-use reqwest_tracing::{SpanBackendWithUrl, TracingMiddleware};
+use reqwest::{Request, Response, Url};
+use reqwest_middleware::{ClientWithMiddleware, Error};
+use reqwest_tracing::{
+    ERROR_MESSAGE, HTTP_RESPONSE_STATUS_CODE, OTEL_STATUS_CODE, ReqwestOtelSpanBackend,
+    TracingMiddleware, default_on_request_failure, default_on_request_success, default_span_name,
+    reqwest_otel_span,
+};
 use serenity::futures::future::Either;
+use tracing::Span;
 use tracing_subscriber::{Layer, filter::EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 lazy_static! {
@@ -115,9 +122,57 @@ pub fn client() -> TracedHttpClient {
 
     TracedHttpClient(Arc::new(
         reqwest_middleware::ClientBuilder::new(client)
-            .with(TracingMiddleware::<SpanBackendWithUrl>::new())
+            .with(TracingMiddleware::<SpanBackendWithUrlOmittingCredentials>::new())
             .build(),
     ))
+}
+
+struct SpanBackendWithUrlOmittingCredentials;
+fn remove_credentials(url: &Url) -> Cow<'_, str> {
+    if !url.username().is_empty() || url.password().is_some() {
+        let mut url = url.clone();
+        // Errors settings username/password are set when the URL can't have credentials, so
+        // they're just ignored.
+        url.set_username("")
+            .and_then(|_| url.set_password(None))
+            .ok();
+        url.to_string().into()
+    } else {
+        url.as_ref().into()
+    }
+}
+impl ReqwestOtelSpanBackend for SpanBackendWithUrlOmittingCredentials {
+    fn on_request_start(req: &Request, ext: &mut Extensions) -> Span {
+        let name = default_span_name(req, ext);
+        let mut url = req.url().clone();
+        url.set_query(None);
+        let url = remove_credentials(&url);
+        let span = reqwest_otel_span!(name = name, req, url.full = %url);
+        span
+    }
+
+    fn on_request_end(
+        span: &Span,
+        outcome: &reqwest_middleware::Result<Response>,
+        _: &mut Extensions,
+    ) {
+        match outcome {
+            Ok(response) => default_on_request_success(span, response),
+            Err(e) => {
+                if cfg!(feature = "full_twitch_errors") {
+                    default_on_request_failure(span, e);
+                } else {
+                    span.record(OTEL_STATUS_CODE, "ERROR");
+                    span.record(ERROR_MESSAGE, "HTTP error occurred");
+                    if let Error::Reqwest(e) = e
+                        && let Some(status) = e.status()
+                    {
+                        span.record(HTTP_RESPONSE_STATUS_CODE, status.as_u16());
+                    }
+                }
+            }
+        }
+    }
 }
 
 // Basically copy-pasted from twitch_api's internal impl,
@@ -134,12 +189,16 @@ impl twitch_api::HttpClient for TracedHttpClient {
         use std::convert::TryFrom;
         let req = match reqwest::Request::try_from(request) {
             Ok(req) => req,
-            Err(e) => return Either::Right(async { Err(reqwest_middleware::Error::Reqwest(e)) }),
+            Err(e) => {
+                return Either::Right(async {
+                    Err(reqwest_middleware::Error::Reqwest(e.without_url()))
+                });
+            }
         };
         let client = self.0.clone();
         let fut = async move {
             // Await the request and translate to `http::Response`
-            let mut response = client.execute(req).await?;
+            let mut response = client.execute(req).await.map_err(|e| e.without_url())?;
             let mut result = http::Response::builder().status(response.status());
             let headers = result
                 .headers_mut()
@@ -148,7 +207,7 @@ impl twitch_api::HttpClient for TracedHttpClient {
             std::mem::swap(headers, response.headers_mut());
             let result = result.version(response.version());
             Ok(result
-                .body(response.bytes().await?)
+                .body(response.bytes().await.map_err(|e| e.without_url())?)
                 .expect("mismatch reqwest -> http conversion should not fail"))
         };
         Either::Left(fut)

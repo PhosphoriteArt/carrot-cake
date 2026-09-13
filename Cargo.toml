@@ -1,11 +1,12 @@
 [package]
 name = "carrot_cake"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 
 [features]
 default = ["dev"]
 dev = []
+full_twitch_errors = []
 
 [profile.release]
 strip = "symbols"
