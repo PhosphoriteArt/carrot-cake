@@ -1,5 +1,7 @@
 # Carrot Cake! 🥕
 
+<img src="docs/logo.png" width="200" alt="the icon - it's a cake with the coloration of a carrot and a green tuft in the back. a small pink dollop of cream is on top.">
+
 Carrot Cake is a lil' twitch "now streaming" notifier for Discord!
 
 I made it because I thought it would be a fun project after Penny Snapcube
