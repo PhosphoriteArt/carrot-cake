@@ -14,14 +14,15 @@ lazy_static! {
     .expect("failed to parse config");
 
     // Guild -> (Twitch Login -> (Channel -> Ping))
-    pub static ref BY_GUILD_ID: HashMap<GuildId, HashMap<String, HashMap<ChannelId, Option<String>>>> =
+    pub static ref BY_GUILD_ID: HashMap<GuildId, HashMap<String, HashMap<ChannelId, &'static NotifyConfig>>> =
         derive_by_guild_id();
 }
 
 // Computes a reverse mapping form the config so individual guilds can easily look up
 // what they need in order to deliver notifications for the right streamers to the right channels
-fn derive_by_guild_id() -> HashMap<GuildId, HashMap<String, HashMap<ChannelId, Option<String>>>> {
-    let mut map: HashMap<GuildId, HashMap<String, HashMap<ChannelId, Option<String>>>> =
+fn derive_by_guild_id()
+-> HashMap<GuildId, HashMap<String, HashMap<ChannelId, &'static NotifyConfig>>> {
+    let mut map: HashMap<GuildId, HashMap<String, HashMap<ChannelId, &'static NotifyConfig>>> =
         HashMap::new();
 
     for stream in &CONFIG.streams {
@@ -35,17 +36,17 @@ fn derive_by_guild_id() -> HashMap<GuildId, HashMap<String, HashMap<ChannelId, O
                     let inner = ent.get_mut();
                     match inner.entry(stream.streamer_login.clone()) {
                         Entry::Occupied(mut ent) => {
-                            ent.get_mut().insert(cid, notify.ping.clone());
+                            ent.get_mut().insert(cid, &notify);
                         }
                         Entry::Vacant(ent) => {
-                            ent.insert(HashMap::new()).insert(cid, notify.ping.clone());
+                            ent.insert(HashMap::new()).insert(cid, &notify);
                         }
                     }
                 }
                 Entry::Vacant(ent) => {
                     ent.insert(HashMap::new()).insert(
                         stream.streamer_login.clone(),
-                        HashMap::from_iter([(cid, notify.ping.clone())]),
+                        HashMap::from_iter([(cid, notify)]),
                     );
                 }
             }
@@ -70,4 +71,6 @@ pub struct NotifyConfig {
     pub guild_id: String,
     pub channel_id: String,
     pub ping: Option<String>,
+    pub format_online: Option<String>,
+    pub format_offline: Option<String>,
 }

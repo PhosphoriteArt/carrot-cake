@@ -13,27 +13,25 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, anyhow, bail};
-use chrono::{DateTime, FixedOffset, Utc};
+use anyhow::{Context, bail};
 use dashmap::{DashMap, DashSet, Entry};
 use serenity::{
     Client,
     all::{
-        ChannelId, Color, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor,
-        CreateEmbedFooter, CreateMessage, CurrentUser, EditMessage, GatewayIntents, GetMessages,
-        GuildId, GuildInfo, GuildPagination, Http, Message, MessageId, Timestamp,
+        ChannelId, CreateMessage, CurrentUser, EditMessage, GatewayIntents, GetMessages, GuildId,
+        GuildInfo, GuildPagination, Http,
     },
     futures::future::join_all,
 };
 use tokio::select;
 use twitch_api::{
     helix::{search::Channel, streams::Stream, videos::Video},
-    types::{CategoryId, StreamId, UserId, VideoId},
+    types::{StreamId, UserId},
 };
-use url_builder::URLBuilder;
 
 use crate::{
-    config::{BY_GUILD_ID, CONFIG},
+    config::{BY_GUILD_ID, CONFIG, NotifyConfig},
+    discord::messaging::{StreamInfo, StreamNotifMessage},
     twitch::client::Notification,
     util::{
         SyncEvent,
@@ -44,320 +42,8 @@ use crate::{
     },
 };
 
-// Stores everything we need to make our notifications happen.
-// Everything here should be re-derivable from the message itself!!
-#[derive(Debug, Clone)]
-struct StreamInfo {
-    game_name: String,
-    viewer_count: usize,
-    started_at: Option<DateTime<FixedOffset>>,
-    user_name: String,
-    user_login: String,
-    user_icon: Option<String>,
-    game_id: CategoryId,
-    stream_id: StreamId,
-    stream_title: String,
-    stream_thumbnail: String,
-    video_id: Option<VideoId>,
-    ping: Option<String>,
-    offline: bool,
-}
-
-impl StreamInfo {
-    fn into_pairs_with_context(self) -> (Vec<(&'static str, String)>, String, Option<String>) {
-        (
-            [
-                Some(("game_name", self.game_name)),
-                Some(("viewer_count", self.viewer_count.to_string())),
-                Some(("user_name", self.user_name)),
-                Some(("user_login", self.user_login)),
-                Some(("game_id", self.game_id.to_string())),
-                Some(("stream_id", self.stream_id.to_string())),
-                Some(("stream_title", self.stream_title)),
-                self.started_at.map(|s| ("started_at", s.to_rfc3339())),
-                self.video_id.map(|v| ("video_id", v.to_string())),
-                self.ping.map(|p| ("ping", p)),
-                self.offline.then(|| ("offline", "1".to_string())),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
-            self.stream_thumbnail,
-            self.user_icon,
-        )
-    }
-    fn from_stream(
-        stream: &Stream,
-        user_icon: Option<&str>,
-        video_id: Option<&VideoId>,
-        ping: Option<&str>,
-        offline: bool,
-    ) -> Self {
-        StreamInfo {
-            game_name: stream.game_name.clone(),
-            viewer_count: stream.viewer_count,
-            started_at: DateTime::parse_from_rfc3339(stream.started_at.as_str()).ok(),
-            user_name: stream.user_name.to_string(),
-            user_login: stream.user_login.to_string(),
-            game_id: stream.game_id.clone(),
-            stream_id: stream.id.clone(),
-            stream_title: stream.title.clone(),
-            stream_thumbnail: stream.thumbnail_url.clone(),
-            ping: ping.map(|s| s.to_string()),
-            user_icon: user_icon.map(|ui| ui.to_string()),
-            video_id: video_id.cloned(),
-            offline,
-        }
-    }
-    fn from_pairs_with_context(
-        pairs: impl IntoIterator<Item = (String, String)>,
-        stream_thumbnail: String,
-        user_icon: Option<String>,
-    ) -> Option<Self> {
-        let mut game_name: Option<String> = None;
-        let mut viewer_count: Option<usize> = None;
-        let mut user_name: Option<String> = None;
-        let mut user_login: Option<String> = None;
-        let mut game_id: Option<CategoryId> = None;
-        let mut stream_id: Option<StreamId> = None;
-        let mut stream_title: Option<String> = None;
-
-        let mut started_at: Option<DateTime<FixedOffset>> = None;
-        let mut video_id: Option<VideoId> = None;
-        let mut ping: Option<String> = None;
-        let mut offline: bool = false;
-
-        for (key, value) in pairs {
-            match key.as_str() {
-                "offline" => {
-                    offline = true;
-                }
-                "game_name" => {
-                    game_name = Some(value.to_string());
-                }
-                "viewer_count" => {
-                    viewer_count = value.parse().ok();
-                }
-                "user_name" => {
-                    user_name = Some(value.to_string());
-                }
-                "user_login" => {
-                    user_login = Some(value.to_string());
-                }
-                "game_id" => {
-                    game_id = Some(value.to_string().into());
-                }
-                "stream_id" => {
-                    stream_id = Some(value.to_string().into());
-                }
-                "stream_title" => {
-                    stream_title = Some(value.to_string());
-                }
-                "started_at" => {
-                    started_at = DateTime::parse_from_rfc3339(&value).ok();
-                }
-                "video_id" => {
-                    video_id = Some(value.to_string().into());
-                }
-                "ping" => {
-                    ping = Some(value.to_string());
-                }
-                _ => {}
-            };
-        }
-
-        Some(Self {
-            started_at,
-            video_id,
-            ping,
-            game_name: game_name?,
-            viewer_count: viewer_count?,
-            user_name: user_name?,
-            user_login: user_login?,
-            user_icon,
-            game_id: game_id?,
-            stream_id: stream_id?,
-            stream_title: stream_title?,
-            stream_thumbnail,
-            offline,
-        })
-    }
-
-    fn headline_vod(&self) -> String {
-        format!(
-            "{}**{}** streamed :projector:",
-            if let Some(ping) = &self.ping {
-                format!("<@{}>, ", ping)
-            } else {
-                "".to_owned()
-            },
-            self.user_name
-        )
-    }
-
-    fn headline_streaming(&self) -> String {
-        format!(
-            "{}**{}** is streaming! :tada: ",
-            if let Some(ping) = &self.ping {
-                format!("<@{}>, ", ping)
-            } else {
-                "".to_owned()
-            },
-            self.user_name
-        )
-    }
-
-    fn streaming_components(&self) -> Vec<CreateActionRow> {
-        vec![CreateActionRow::Buttons(
-            [Some(self.stream_button()), self.vod_button()]
-                .into_iter()
-                .flatten()
-                .collect(),
-        )]
-    }
-
-    fn vod_components(&self) -> Option<Vec<CreateActionRow>> {
-        self.vod_button()
-            .map(|b| vec![CreateActionRow::Buttons(vec![b])])
-    }
-
-    fn vod_button(&self) -> Option<CreateButton> {
-        self.video_id.as_ref().map(|v| {
-            CreateButton::new_link(format!("https://twitch.tv/videos/{}", v))
-                .label("Watch the VOD!")
-        })
-    }
-
-    fn stream_button(&self) -> CreateButton {
-        CreateButton::new_link(format!("https://twitch.tv/{}", self.user_login))
-            .label("Watch the stream!")
-    }
-
-    fn stream_embed(&self) -> CreateEmbed {
-        let fields: Vec<_> = [
-            (if !self.game_name.is_empty() {
-                Some(("**Game name**", self.game_name.to_string(), true))
-            } else {
-                None
-            }),
-            Some(("**Viewers**", self.viewer_count.to_string(), true)),
-            (if self.offline
-                && let Some(dt) = self.started_at.as_ref()
-                && let Ok(duration) = Utc::now().signed_duration_since(dt).to_std()
-            {
-                Some((
-                    "**Duration**",
-                    humantime::format_duration(
-                        duration - Duration::new(0, duration.subsec_nanos()),
-                    )
-                    .to_string(),
-                    true,
-                ))
-            } else {
-                None
-            }),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-
-        let author = {
-            let mut cea = CreateEmbedAuthor::new(self.user_name.to_string());
-            if let Some(user_icon) = &self.user_icon {
-                cea = cea.icon_url(user_icon.to_string())
-            };
-            cea
-        };
-
-        let mut thumb_url = URLBuilder::new();
-
-        thumb_url
-            .set_protocol("https")
-            .set_host("static-cdn.jtvnw.net")
-            .add_route("ttv-boxart")
-            .add_route(&format!("{}.jpg", self.game_id));
-
-        for (key, value) in self.clone().into_pairs_with_context().0 {
-            thumb_url.add_param(&urlencoding::encode(key), &urlencoding::encode(&value));
-        }
-
-        let url = thumb_url.build();
-
-        let mut embed = CreateEmbed::new()
-            .color(Color::from_rgb(240, 161, 163))
-            .title(if self.stream_title.trim().is_empty() {
-                "<untitled>".to_string()
-            } else {
-                self.stream_title.to_string()
-            })
-            .fields(fields)
-            .author(author)
-            .thumbnail(url)
-            .image(
-                self.stream_thumbnail
-                    .replace("{width}", "1080")
-                    .replace("{height}", "720"),
-            )
-            .url(format!("https://twitch.tv/{}", self.user_login));
-
-        if self.offline {
-            embed = embed
-                .footer(CreateEmbedFooter::new("Last online"))
-                .timestamp(Timestamp::now())
-        }
-
-        embed
-    }
-}
-
-#[derive(Debug, Clone)]
-struct StreamNotifMessage {
-    channel_id: ChannelId,
-    message_id: MessageId,
-    timestamp: Timestamp,
-    edited_timestamp: Option<Timestamp>,
-
-    info: StreamInfo,
-}
-
-impl StreamNotifMessage {
-    fn touched_timestamp(&self) -> &Timestamp {
-        self.edited_timestamp.as_ref().unwrap_or(&self.timestamp)
-    }
-}
-
-impl TryFrom<Message> for StreamNotifMessage {
-    type Error = anyhow::Error;
-
-    fn try_from(msg: Message) -> Result<Self, Self::Error> {
-        let stream_info = msg
-            .embeds
-            .into_iter()
-            .find_map(|e| {
-                let thumb = e.thumbnail?;
-                let image = e.image?;
-                let user_icon = e.author.and_then(|au| au.icon_url);
-                let url = reqwest::Url::parse(&thumb.url).ok()?;
-
-                StreamInfo::from_pairs_with_context(
-                    url.query_pairs()
-                        .into_iter()
-                        .map(|(a, b)| (a.into_owned(), b.into_owned())),
-                    image.url,
-                    user_icon,
-                )
-            })
-            .ok_or_else(|| anyhow!("No stream info found in message {}", &msg.id))?;
-
-        Ok(StreamNotifMessage {
-            message_id: msg.id,
-            channel_id: msg.channel_id,
-            timestamp: msg.timestamp,
-            edited_timestamp: msg.edited_timestamp,
-            info: stream_info,
-        })
-    }
-}
+pub(in crate::discord) mod format;
+pub(in crate::discord) mod messaging;
 
 pub struct InnerConnection {
     client: Arc<Http>,
@@ -546,8 +232,13 @@ impl InnerConnection {
                 login
             );
 
-            self.update_stream_for_guild(guild, notif.clone(), channels, edit_only)
-                .await;
+            self.update_stream_for_guild(
+                guild,
+                notif.clone(),
+                channels.iter().map(|(a, b)| (a, *b)).collect::<Vec<_>>(),
+                edit_only,
+            )
+            .await;
         }
 
         Ok(())
@@ -557,14 +248,14 @@ impl InnerConnection {
         &self,
         guild: GuildInfo,
         notif: Notification,
-        channels: impl IntoIterator<Item = (&ChannelId, &Option<String>)>,
+        channels: impl IntoIterator<Item = (&ChannelId, &'static NotifyConfig)>,
         edit_only: bool,
     ) {
         let gid = guild.id;
         let gname = guild.name;
-        for (channel, ping) in channels.into_iter() {
+        for (channel, cfg) in channels.into_iter() {
             match self
-                .update_stream_for_channel(channel, ping.as_deref(), &notif, edit_only)
+                .update_stream_for_channel(channel, cfg, &notif, edit_only)
                 .await
             {
                 Ok(edit_type) => {
@@ -708,15 +399,15 @@ impl InnerConnection {
         Ok(())
     }
 
-    fn info_from_notif(&self, notif: &Notification, ping: Option<&str>) -> StreamInfo {
+    fn info_from_notif(&self, notif: &Notification, cfg: &'static NotifyConfig) -> StreamInfo {
         StreamInfo::from_stream(
             notif.stream(),
             self.bcids
                 .get(&notif.stream().user_id)
                 .map(|c| c.thumbnail_url.as_str()),
             notif.video().as_ref().map(|v| &v.id),
-            ping,
             matches!(notif, Notification::Offline(..)),
+            cfg,
         )
     }
 
@@ -724,10 +415,10 @@ impl InnerConnection {
     async fn update_existing_message(
         &self,
         message: &StreamNotifMessage,
-        ping: Option<&str>,
+        cfg: &'static NotifyConfig,
         notif: &Notification,
     ) -> anyhow::Result<()> {
-        let new_info = self.info_from_notif(notif, ping);
+        let new_info = self.info_from_notif(notif, cfg);
 
         match notif {
             Notification::Online(..) | Notification::Update(..) => {
@@ -768,7 +459,7 @@ impl InnerConnection {
     async fn try_edit_cached(
         &self,
         channel: &ChannelId,
-        ping: Option<&str>,
+        cfg: &'static NotifyConfig,
         notif: &Notification,
     ) -> anyhow::Result<bool> {
         if let Some(cached) = self
@@ -776,7 +467,7 @@ impl InnerConnection {
             .get(&(*channel, notif.stream().id.clone()))
             .map(|opt| opt.clone())
         {
-            if let Err(e) = self.update_existing_message(&cached, ping, notif).await {
+            if let Err(e) = self.update_existing_message(&cached, cfg, notif).await {
                 log::warn!(
                     "Failed to edit message on first try, backing off and trying again: {e}"
                 );
@@ -793,7 +484,7 @@ impl InnerConnection {
             .find(|v| v.info.stream_id == notif.stream().id);
 
         if let Some(last_info) = last_info {
-            self.update_existing_message(&last_info, ping, notif)
+            self.update_existing_message(&last_info, cfg, notif)
                 .await?;
             Ok(true)
         } else {
@@ -805,11 +496,11 @@ impl InnerConnection {
     async fn update_stream_for_channel(
         &self,
         channel: &ChannelId,
-        ping: Option<&str>,
+        cfg: &'static NotifyConfig,
         notif: &Notification,
         edit_only: bool,
     ) -> anyhow::Result<&'static str> {
-        if self.try_edit_cached(channel, ping, notif).await? {
+        if self.try_edit_cached(channel, cfg, notif).await? {
             return Ok("edit");
         }
         if edit_only {
@@ -820,7 +511,7 @@ impl InnerConnection {
             bail!("Cache not ready for {channel}; was there a failure earlier?");
         }
 
-        let new_info = self.info_from_notif(notif, ping);
+        let new_info = self.info_from_notif(notif, cfg);
 
         match notif {
             Notification::Online(..) | Notification::Update(..) => {
