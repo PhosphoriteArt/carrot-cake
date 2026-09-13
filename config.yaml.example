@@ -10,5 +10,5 @@ streams:
         # {game_id}, {stream_id}, {stream_title}, {video_id}, {ping}
         #
         # {ping} will always use the correct ping format given your `ping` selection above.
-        format_online: "Hey {ping}! Guess who's streaming? That's right, {user_name}! Come on in!"
-        format_offline: "{username} was streaming earlier."
+        format_online: "Hey {ping}! Guess who's streaming? That's right, **{user_name}**! Come on in!"
+        format_offline: "**{user_name}** was streaming earlier."
