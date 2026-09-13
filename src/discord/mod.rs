@@ -11,7 +11,6 @@ use std::{
     env,
     ops::Deref,
     path::PathBuf,
-    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -81,6 +80,13 @@ impl Deref for DiscordConnection {
     }
 }
 
+fn cache_path() -> PathBuf {
+    env::var("DISCORD_CACHE")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or(env::temp_dir().join("carrot-cake-discord-cache.json"))
+}
+
 impl DiscordConnection {
     pub async fn new(token: String, bcids: HashMap<UserId, Channel>) -> anyhow::Result<Self> {
         let mut discord_client = Client::builder(&token, GatewayIntents::from_bits_retain(84992))
@@ -91,23 +97,21 @@ impl DiscordConnection {
         let user = discord_client.http.get_current_user().await?;
 
         let cache = DashMap::new();
-        if let Ok(cache_path) = env::var("DISCORD_CACHE") {
-            match std::fs::OpenOptions::new().read(true).open(cache_path) {
-                Ok(file) => {
-                    let contents: Result<Vec<((ChannelId, StreamId), StreamNotifMessage)>, _> =
-                        serde_json::from_reader(file);
-                    match contents {
-                        Ok(data) => {
-                            for (key, value) in data {
-                                cache.insert(key, value);
-                            }
-                            log::info!("Read back DISCORD_CACHE");
+        match std::fs::OpenOptions::new().read(true).open(cache_path()) {
+            Ok(file) => {
+                let contents: Result<Vec<((ChannelId, StreamId), StreamNotifMessage)>, _> =
+                    serde_json::from_reader(file);
+                match contents {
+                    Ok(data) => {
+                        for (key, value) in data {
+                            cache.insert(key, value);
                         }
-                        Err(e) => log::warn!("Couldn't read DISCORD_CACHE: {e}"),
+                        log::info!("Read back DISCORD_CACHE");
                     }
+                    Err(e) => log::warn!("Couldn't read DISCORD_CACHE: {e}"),
                 }
-                Err(e) => log::warn!("Couldn't open DISCORD_CACHE: {e}"),
             }
+            Err(e) => log::warn!("Couldn't open DISCORD_CACHE: {e}"),
         }
 
         let client = Self {
@@ -336,21 +340,19 @@ impl InnerConnection {
             self.message_cache.remove(&key);
         }
 
-        if let Ok(cache_path) = env::var("DISCORD_CACHE") {
-            if let Err(e) = self.dump_cache(&cache_path).await {
-                log::error!("Failed to write discord cache: {e}")
-            }
+        if let Err(e) = self.dump_cache(cache_path()).await {
+            log::error!("Failed to write discord cache: {e}")
         }
 
         self.initial_reconciliation_finished.signal().await;
         Ok(())
     }
 
-    async fn dump_cache(&self, path: &str) -> anyhow::Result<()> {
-        let pb = PathBuf::from_str(path)?;
-        let tmp = pb.with_added_extension(".swp");
+    async fn dump_cache(&self, path: PathBuf) -> anyhow::Result<()> {
+        let tmp = path.with_added_extension(".swp");
         let file = std::fs::OpenOptions::new()
-            .create_new(true)
+            .create(true)
+            .truncate(true)
             .read(false)
             .write(true)
             .open(&tmp)?;
@@ -361,7 +363,7 @@ impl InnerConnection {
             .map(|e| (e.key().clone(), e.value().clone()))
             .collect::<Vec<_>>();
         serde_json::to_writer(file, &content)?;
-        fs::rename(tmp, pb).await?;
+        fs::rename(tmp, path).await?;
         Ok(())
     }
 
@@ -479,7 +481,10 @@ impl InnerConnection {
         cfg: &'static NotifyConfig,
         notif: &Notification,
     ) -> anyhow::Result<()> {
-        let new_info = self.info_from_notif(notif, cfg);
+        let mut new_info = self.info_from_notif(notif, cfg);
+        new_info.video_id = new_info
+            .video_id
+            .or_else(|| message.info.video_id.as_ref().cloned());
 
         match notif {
             Notification::Online(..) | Notification::Update(..) => {

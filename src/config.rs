@@ -36,10 +36,10 @@ fn derive_by_guild_id()
                     let inner = ent.get_mut();
                     match inner.entry(stream.streamer_login.clone()) {
                         Entry::Occupied(mut ent) => {
-                            ent.get_mut().insert(cid, &notify);
+                            ent.get_mut().insert(cid, notify);
                         }
                         Entry::Vacant(ent) => {
-                            ent.insert(HashMap::new()).insert(cid, &notify);
+                            ent.insert(HashMap::new()).insert(cid, notify);
                         }
                     }
                 }

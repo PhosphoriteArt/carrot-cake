@@ -215,8 +215,8 @@ impl StreamInfo {
             stream_title: stream_title?,
             stream_thumbnail,
             offline,
-            format_online: format_online,
-            format_offline: format_offline,
+            format_online,
+            format_offline,
         })
     }
 

@@ -4,18 +4,21 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     ops::Deref,
+    path::PathBuf,
+    str::FromStr,
     sync::{Arc, Mutex},
 };
 
 use dashmap::DashMap;
 use serenity::futures::future::join_all;
-use tokio::sync::broadcast;
+use tokio::{fs, sync::broadcast};
 use twitch_api::{
     helix::{search::SearchChannelsRequest, streams::Stream, videos::Video},
     twitch_oauth2::{AppAccessToken, ClientId, ClientSecret},
+    types::ConduitId,
 };
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 
 use crate::{
     twitch::{
@@ -45,6 +48,26 @@ impl Deref for OnlineClient {
     }
 }
 
+fn conduit_path() -> PathBuf {
+    std::env::temp_dir().join("carrot-cake-conduit.id")
+}
+
+async fn get_saved_conduit() -> Option<ConduitId> {
+    fs::read(conduit_path())
+        .await
+        .ok()
+        .and_then(|contents| String::from_utf8(contents).ok())
+        .and_then(|contents| ConduitId::from_str(&contents).ok())
+}
+async fn save_conduit(cid: &ConduitId) -> anyhow::Result<()> {
+    fs::write(conduit_path(), cid.as_str()).await?;
+    Ok(())
+}
+async fn delete_conduit() -> anyhow::Result<()> {
+    fs::remove_file(conduit_path()).await?;
+    Ok(())
+}
+
 impl OnlineClient {
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip(client_secret), name = "OnlineClient::new")]
@@ -69,8 +92,26 @@ impl OnlineClient {
             )
             .await?;
 
+        if let Some(old_conduit) = get_saved_conduit().await {
+            increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "delete_conduit");
+
+            if let Err(e) = twitch_client.delete_conduit(old_conduit, &token).await {
+                match e {
+                    twitch_api::helix::ClientRequestError::HelixRequestDeleteError(
+                        twitch_api::helix::HelixRequestDeleteError::Error {
+                            status: http::StatusCode::NOT_FOUND,
+                            ..
+                        },
+                    ) => {}
+                    e => bail!(e),
+                }
+            }
+        }
         increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "create_conduit");
         let conduit = twitch_client.create_conduit(1, &token).await?;
+        if let Err(e) = save_conduit(&conduit.id).await {
+            log::warn!("Couldn't save conduit ID to tempdir: {e}");
+        };
 
         // find the channels for the given usernames; events
         // have to be subscribed by channel ID.
@@ -160,6 +201,7 @@ impl OnlineClient {
                 self.conduit_id.as_str()
             )
         } else {
+            let _ = delete_conduit().await;
             log::info!("Cleaned up conduit {} ", self.conduit_id.as_str())
         }
     }

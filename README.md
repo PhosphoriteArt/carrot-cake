@@ -76,7 +76,7 @@ Carrot Cake is pretty thoroughly instrumented with OpenTelemetry. When enabled w
 
 You can look at the [`docker-compose.yaml` file in the repo](https://github.com/PhosphoriteArt/carrot-cake/blob/main/docker-compose.yaml) if you want to see what that might look like!
 
-### Discord cache
+### Caches
 
 If your bot is colocated in a channel that has a lot of chatter, it may lose
 track of what it's posted if it restarts. If this is the case, you can set
@@ -87,6 +87,11 @@ DISCORD_CACHE="path/to/cache.json"
 
 in your `secrets.env` that will persist message it's sent for a given
 stream ID across restarts.
+
+When unset, it defaults to a file called carrot-cake-cache.json in your system's
+temporary directory.
+
+We also cache the Twitch Conduit ID in this folder so that we can clean it up if we crash.
 
 ## Building from Source
 
