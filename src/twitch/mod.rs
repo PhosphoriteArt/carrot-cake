@@ -7,6 +7,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use dashmap::DashMap;
 use serenity::futures::future::join_all;
 use tokio::sync::broadcast;
 use twitch_api::{
@@ -18,7 +19,7 @@ use anyhow::anyhow;
 
 use crate::{
     twitch::{
-        client::{InnerOnlineClient, Notification},
+        client::{InnerOnlineClient, TwitchMessage},
         websocket::WebsocketRunner,
     },
     util::{
@@ -136,8 +137,8 @@ impl OnlineClient {
                 live_sync_closed: SyncEvent::new(),
                 full_sync_closed: SyncEvent::new(),
                 prune_closed: SyncEvent::new(),
-                seen: Mutex::new(HashMap::new()),
-                state: Mutex::new(HashMap::new()),
+                seen: Arc::new(DashMap::new()),
+                state: Arc::new(DashMap::new()),
             }),
         };
 
@@ -153,7 +154,7 @@ impl OnlineClient {
     }
 
     // returns a listener for the events we're pushing out
-    pub fn handle(&self) -> broadcast::Receiver<Notification> {
+    pub fn handle(&self) -> broadcast::Receiver<TwitchMessage> {
         self.inner.cast.subscribe()
     }
 

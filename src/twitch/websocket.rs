@@ -70,7 +70,6 @@ impl WebsocketRunner {
         });
 
         loop {
-            log::debug!("Waiting...");
             tokio::select! {
                 biased;
                 _ = self.close.wait() => {

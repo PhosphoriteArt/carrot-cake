@@ -5,7 +5,7 @@ use tokio::signal;
 use crate::{
     config::{BY_GUILD_ID, CONFIG},
     discord::DiscordConnection,
-    twitch::OnlineClient,
+    twitch::{OnlineClient, client::TwitchMessage},
     util::metrics,
 };
 
@@ -55,9 +55,21 @@ async fn main() -> anyhow::Result<()> {
 
     while let Ok(evt) = recv.recv().await {
         log::info!("Got twitch event: {evt:?}");
-        if let Err(e) = discord_client.update_stream(evt).await {
-            log::error!("Error updating discord: {e}")
-        }
+        let cli = discord_client.clone();
+        let _ = tokio::spawn(async move {
+            match evt {
+                TwitchMessage::Delta(notification) => {
+                    if let Err(e) = cli.update_stream(notification).await {
+                        log::error!("Error updating discord: {e}")
+                    }
+                }
+                TwitchMessage::Reconcile(items) => {
+                    if let Err(e) = cli.reconcile(items).await {
+                        log::error!("Error updating discord: {e}")
+                    }
+                }
+            }
+        });
     }
 
     log::info!("Shutting down metrics");

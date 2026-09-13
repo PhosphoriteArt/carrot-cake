@@ -12,6 +12,8 @@ lazy_static! {
             .expect("failed to read file")
     )
     .expect("failed to parse config");
+
+    // Guild -> (Twitch Login -> (Channel -> Ping))
     pub static ref BY_GUILD_ID: HashMap<GuildId, HashMap<String, HashMap<ChannelId, Option<String>>>> =
         derive_by_guild_id();
 }

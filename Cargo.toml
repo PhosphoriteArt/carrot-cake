@@ -46,5 +46,8 @@ serde_yaml = "0.9.34"
 serenity = { version = "0.12.5", default-features = false, features = [
   "builder", "chrono", "client", "gateway", "model", "http", "native_tls_backend",
 ] }
-chrono = "0.4.45"
+chrono = { version = "0.4.45", features = ["serde"] }
 humantime = "2.4.0"
+dashmap = "6.2.1"
+url-builder = "0.1.1"
+urlencoding = "2.1.3"

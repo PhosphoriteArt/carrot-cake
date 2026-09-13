@@ -1,10 +1,11 @@
 use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::{self, Duration, Instant},
 };
 
 use anyhow::bail;
+use dashmap::{DashMap, Entry};
 use serenity::futures::StreamExt;
 use tokio::sync::broadcast;
 use twitch_api::{
@@ -24,6 +25,18 @@ use crate::util::{
 };
 
 #[derive(Clone, Debug)]
+pub enum TwitchMessage {
+    Delta(Notification),
+    Reconcile(Vec<(Stream, Option<Video>)>),
+}
+
+impl From<Notification> for TwitchMessage {
+    fn from(value: Notification) -> Self {
+        TwitchMessage::Delta(value)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum Notification {
     Online(Stream, Option<Video>),
     Update(Stream, Option<Video>),
@@ -38,6 +51,13 @@ impl Notification {
             | Notification::Offline(stream, _) => stream,
         }
     }
+    pub fn video(&self) -> Option<&Video> {
+        match self {
+            Notification::Online(_, video)
+            | Notification::Update(_, video)
+            | Notification::Offline(_, video) => video.as_ref(),
+        }
+    }
 }
 
 pub struct InnerOnlineClient {
@@ -48,7 +68,7 @@ pub struct InnerOnlineClient {
     pub curr_token: Mutex<AppAccessToken>,
     pub curr_client_id: Mutex<Option<String>>,
 
-    pub cast: broadcast::Sender<Notification>,
+    pub cast: broadcast::Sender<TwitchMessage>,
 
     pub close: SyncEvent,
     pub ws_closed: SyncEvent,
@@ -59,9 +79,9 @@ pub struct InnerOnlineClient {
     // Twitch doesn't guarantee exactly-once events,
     // and asks to deduplicate events by event ID, and ignore events
     // older than 10min. We prune this map in the background every 10min.
-    pub seen: Mutex<HashMap<String, time::Instant>>,
+    pub seen: Arc<DashMap<String, time::Instant>>,
 
-    pub state: Mutex<HashMap<UserId, (Stream, Option<Video>)>>,
+    pub state: Arc<DashMap<UserId, (Stream, Option<Video>)>>,
 }
 
 impl InnerOnlineClient {
@@ -83,16 +103,15 @@ impl InnerOnlineClient {
     }
 
     fn prune(&self) {
-        let mut seen = self.seen.lock().unwrap();
         let mut to_remove = HashSet::new();
-        for (key, v) in seen.iter() {
-            if Instant::now().saturating_duration_since(*v) > Duration::from_mins(10) {
-                to_remove.insert(key.clone());
+        for ent in self.seen.iter() {
+            if Instant::now().saturating_duration_since(*ent.value()) > Duration::from_mins(10) {
+                to_remove.insert(ent.key().clone());
             }
         }
 
         for key in to_remove.into_iter() {
-            seen.remove(&key);
+            self.seen.remove(&key);
         }
     }
 
@@ -172,17 +191,19 @@ impl InnerOnlineClient {
     }
 
     pub async fn full_sync(&self) -> anyhow::Result<()> {
-        self.do_sync(self.broadcaster_ids.keys().cloned()).await
+        self.do_sync(self.broadcaster_ids.keys().cloned()).await?;
+        self.cast.send(TwitchMessage::Reconcile(
+            self.state
+                .iter()
+                .map(|ent| (ent.value().0.clone(), ent.value().1.clone()))
+                .collect(),
+        ))?;
+
+        Ok(())
     }
 
     pub async fn sync_live(&self) -> anyhow::Result<()> {
-        let keys: Vec<_> = self
-            .state
-            .lock()
-            .unwrap()
-            .keys()
-            .map(|k| k.to_string())
-            .collect();
+        let keys: Vec<_> = self.state.iter().map(|e| e.key().to_string()).collect();
 
         self.do_sync(keys.into_iter().map(UserId::from)).await
     }
@@ -221,18 +242,17 @@ impl InnerOnlineClient {
                     .first();
 
                 {
-                    let mut state = self.state.lock().unwrap();
-                    match state.entry(next.user_id.clone()) {
+                    match self.state.entry(next.user_id.clone()) {
                         Entry::Occupied(mut ent) => {
                             let orig = ent.get();
                             if (&orig.0, &orig.1) != (&next, &video) {
                                 ent.insert((next.clone(), video.clone()));
-                                self.cast.send(Notification::Update(next, video))?;
+                                self.cast.send(Notification::Update(next, video).into())?;
                             }
                         }
                         Entry::Vacant(ent) => {
                             ent.insert((next.clone(), video.clone()));
-                            self.cast.send(Notification::Online(next, video))?;
+                            self.cast.send(Notification::Online(next, video).into())?;
                         }
                     }
                 }
@@ -248,11 +268,10 @@ impl InnerOnlineClient {
         //          do that for the scope of this app)
         for uid in keys {
             if !observed.contains(&uid) {
-                let mut state = self.state.lock().unwrap();
-                match state.entry(uid) {
+                match self.state.entry(uid) {
                     Entry::Occupied(ent) => {
                         let v = ent.remove();
-                        self.cast.send(Notification::Offline(v.0, v.1))?;
+                        self.cast.send(Notification::Offline(v.0, v.1).into())?;
                     }
                     Entry::Vacant(_) => {}
                 }
@@ -263,8 +282,7 @@ impl InnerOnlineClient {
     }
 
     pub fn dedupe(&self, id: String) -> anyhow::Result<()> {
-        let mut seen = self.seen.lock().unwrap();
-        let entry = seen.entry(id);
+        let entry = self.seen.entry(id);
         match entry {
             Entry::Occupied(mut ent) => {
                 if Instant::now().saturating_duration_since(*ent.get()) < Duration::from_mins(10) {
