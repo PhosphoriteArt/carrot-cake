@@ -261,11 +261,6 @@ impl InnerOnlineClient {
             observed
         };
 
-        // Anyone not returned in the above search is no longer live
-        // WONTFIX: If we crash while someone is online, then they go offline,
-        //          we'll miss sending an update about it. (Fixing this would
-        //          require introducing persistent storage and I don't want to
-        //          do that for the scope of this app)
         for uid in keys {
             if !observed.contains(&uid) {
                 match self.state.entry(uid) {

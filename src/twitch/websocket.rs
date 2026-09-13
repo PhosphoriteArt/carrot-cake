@@ -277,6 +277,7 @@ impl WebsocketConnection {
                 metadata: m,
                 payload,
             } => {
+                *self.last_keepalive.lock().unwrap() = Instant::now();
                 self.inner.dedupe(m.message_id.to_string())?;
                 if let Some(keepalive) = payload.session.keepalive_timeout_seconds {
                     self.keepalive.store(keepalive, Ordering::Release);
@@ -366,6 +367,7 @@ impl WebsocketConnection {
                 metadata: m,
                 payload,
             } => {
+                *self.last_keepalive.lock().unwrap() = Instant::now();
                 self.inner.dedupe(m.message_id.to_string())?;
 
                 match payload {
@@ -391,6 +393,7 @@ impl WebsocketConnection {
                 metadata: m,
                 payload,
             } => {
+                *self.last_keepalive.lock().unwrap() = Instant::now();
                 self.inner.dedupe(m.message_id.to_string())?;
                 log::warn!("Got revocation, will reconnect: {payload:?}");
                 Ok(false)
@@ -399,6 +402,7 @@ impl WebsocketConnection {
                 metadata: m,
                 payload,
             } => {
+                *self.last_keepalive.lock().unwrap() = Instant::now();
                 self.inner.dedupe(m.message_id.to_string())?;
 
                 let url = payload

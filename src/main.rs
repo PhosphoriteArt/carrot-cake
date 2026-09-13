@@ -58,7 +58,19 @@ async fn main() -> anyhow::Result<()> {
     let initial_reconciliation = SyncEvent::new();
     let initial_reconciliation_waiter = initial_reconciliation.clone();
     tokio::spawn(async move {
-        while let Ok(evt) = reconcile.recv().await {
+        loop {
+            let evt = match reconcile.recv().await {
+                Ok(evt) => evt,
+                Err(e) => match e {
+                    Closed => {
+                        break;
+                    }
+                    Lagged(n) => {
+                        log::warn!("Lagged and missed {n} reconcile events");
+                        continue;
+                    },
+                },
+            };
             if let Err(e) = discord_client_copy.reconcile(evt).await {
                 log::error!("Error updating discord: {e}")
             }
