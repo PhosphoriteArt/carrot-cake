@@ -21,7 +21,7 @@ use twitch_api::{
 
 use crate::util::{
     SyncEvent,
-    metrics::{TOKEN_REFRESH, TOKEN_TTL, TracedHttpClient, increment, record},
+    metrics::{EXTERNAL_CALLS, TOKEN_REFRESH, TOKEN_TTL, TracedHttpClient, increment, record},
 };
 
 #[derive(Clone, Debug)]
@@ -114,6 +114,7 @@ impl InnerOnlineClient {
             return Ok(());
         }
 
+        increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "refresh_token");
         if let Err(e) = tok.refresh_token(&self.client).await {
             increment!(TOKEN_REFRESH; "refreshed": "error");
 
@@ -206,6 +207,7 @@ impl InnerOnlineClient {
             let iter = keys.clone().collect();
 
             let token = { self.curr_token.lock().unwrap().clone() };
+            increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "get_streams");
             let mut streams = self.client.get_streams_from_ids(&iter, &token);
 
             let mut observed: HashSet<UserId> = HashSet::new();
@@ -214,6 +216,7 @@ impl InnerOnlineClient {
                 observed.insert(next.user_id.clone());
 
                 // Find the most recent video to use for the VOD link
+                increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "get_videos");
                 let video = self
                     .client
                     .req_get(

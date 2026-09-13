@@ -11,17 +11,20 @@ use dashmap::DashMap;
 use serenity::futures::future::join_all;
 use tokio::sync::broadcast;
 use twitch_api::{
-    helix::{search::SearchChannelsRequest, streams::Stream, videos::Video}, twitch_oauth2::{AppAccessToken, ClientId, ClientSecret},
+    helix::{search::SearchChannelsRequest, streams::Stream, videos::Video},
+    twitch_oauth2::{AppAccessToken, ClientId, ClientSecret},
 };
 
 use anyhow::anyhow;
 
 use crate::{
     twitch::{
-        client::{InnerOnlineClient, Notification}, websocket::WebsocketRunner,
-    }, util::{
+        client::{InnerOnlineClient, Notification},
+        websocket::WebsocketRunner,
+    },
+    util::{
         SyncEvent,
-        metrics::{self},
+        metrics::{self, EXTERNAL_CALLS, increment},
     },
 };
 
@@ -55,6 +58,8 @@ impl OnlineClient {
         broadcast::Receiver<Vec<(Stream, Option<Video>)>>,
     )> {
         let twitch_client = twitch_api::helix::HelixClient::with_client(metrics::client());
+
+        increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "get_app_access_token");
         let token: AppAccessToken =
             twitch_api::twitch_oauth2::AppAccessToken::get_app_access_token(
                 &twitch_client,
@@ -67,13 +72,17 @@ impl OnlineClient {
         // Twitch has a limit of how many conduits that can be defined
         // at one time; since we are the only user of our own conduits,
         // find and delete any leftovers from e.g. a previous crash
+        increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "get_conduits");
         match twitch_client.get_conduits(&token).await {
             Ok(conduits) => {
                 let futs = conduits.into_iter().map(|cond| {
                     let c = twitch_client.clone();
                     let tok = token.clone();
                     tokio::spawn(
-                        async move { (c.delete_conduit(cond.id.clone(), &tok).await, cond.id) },
+                        async move {
+                            increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "delete_conduit");
+                            (c.delete_conduit(cond.id.clone(), &tok).await, cond.id)
+                        },
                     )
                 });
                 let results = join_all(futs).await;
@@ -94,6 +103,7 @@ impl OnlineClient {
             }
         }
         // ...then recreate a single-sharded conduit for webhook delivery
+        increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "create_conduit");
         let conduit = twitch_client.create_conduit(1, &token).await?;
 
         // find the channels for the given usernames; events
@@ -102,6 +112,7 @@ impl OnlineClient {
             let twitch_client = twitch_client.clone();
             let token = token.clone();
             async move {
+                increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "search_channels");
                 twitch_client
                     .req_get(
                         SearchChannelsRequest::query(username.to_string())

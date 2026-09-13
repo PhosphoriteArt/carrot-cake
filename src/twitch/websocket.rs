@@ -24,10 +24,8 @@ use twitch_api::eventsub::{self, Event, EventsubWebsocketData, Shard, Transport}
 use anyhow::{Context, anyhow, bail};
 
 use crate::{
-    twitch::{client::InnerOnlineClient, util::twitch_ws_url},
-    util::{
-        SyncEvent,
-        metrics::{TWITCH_MSG_RECEIVED, WS_CONNECT, WS_ERROR, WS_RECEIVED, increment},
+    twitch::{client::InnerOnlineClient, util::twitch_ws_url}, util::{
+        SyncEvent, metrics::{EXTERNAL_CALLS, TWITCH_MSG_RECEIVED, WS_CONNECT, WS_ERROR, WS_RECEIVED, increment},
     },
 };
 
@@ -293,6 +291,7 @@ impl WebsocketConnection {
                     };
                     self.welcome_gate.signal().await;
                     let token = { self.inner.curr_token.lock().unwrap().clone() };
+                    increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "update_conduit_shards");
                     self.inner
                         .client
                         .update_conduit_shards(
@@ -305,6 +304,7 @@ impl WebsocketConnection {
                     let results = join_all(self.inner.broadcaster_ids.keys().cloned().map(|k| {
                         let token = token.clone();
                         async move {
+                            increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "create_eventsub_subscription:online");
                             let online = self
                                 .inner
                                 .client
@@ -316,6 +316,8 @@ impl WebsocketConnection {
                                     &token,
                                 )
                                 .await;
+                            
+                            increment!(EXTERNAL_CALLS; "service": "twitch", "endpoint": "create_eventsub_subscription:offline");
                             let offline = self
                                 .inner
                                 .client

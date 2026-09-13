@@ -38,6 +38,7 @@ lazy_static! {
         .build();
     pub static ref CHANNEL_WRITES: Counter<u64> =
         _ROOT.u64_counter("bb.discord.channel.write").build();
+    pub static ref EXTERNAL_CALLS: Counter<u64> = _ROOT.u64_counter("bb.external.calls").build();
 }
 
 pub async fn init() -> anyhow::Result<Box<dyn FnOnce()>> {

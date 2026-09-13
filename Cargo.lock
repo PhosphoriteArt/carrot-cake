@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "carrot_cake"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "chrono",

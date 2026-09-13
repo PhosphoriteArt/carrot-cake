@@ -38,8 +38,8 @@ use crate::{
     util::{
         SyncEvent,
         metrics::{
-            CHANNEL_SYNC_MESSAGES, CHANNEL_SYNCS, CHANNEL_WRITES, GUILDS, UPDATES, increment,
-            record,
+            CHANNEL_SYNC_MESSAGES, CHANNEL_SYNCS, CHANNEL_WRITES, EXTERNAL_CALLS, GUILDS, UPDATES,
+            increment, record,
         },
     },
 };
@@ -397,6 +397,7 @@ impl DiscordConnection {
             .await
             .context("Err creating client")?;
 
+        increment!(EXTERNAL_CALLS; "service": "discord", "endpoint": "get_current_user");
         let user = discord_client.http.get_current_user().await?;
 
         let client = Self {
@@ -476,6 +477,7 @@ impl InnerConnection {
 
         let mut guilds: Vec<GuildInfo> = Vec::new();
         loop {
+            increment!(EXTERNAL_CALLS; "service": "discord", "endpoint": "get_guilds");
             let next = self
                 .client
                 .get_guilds(
@@ -652,6 +654,7 @@ impl InnerConnection {
         &self,
         channel: ChannelId,
     ) -> anyhow::Result<Vec<StreamNotifMessage>> {
+        increment!(EXTERNAL_CALLS; "service": "discord", "endpoint": "get_channel_messages");
         Ok(channel
             .messages(self.client.deref(), GetMessages::new().limit(50))
             .await?
@@ -682,6 +685,7 @@ impl InnerConnection {
             .add_embed(info.stream_embed())
             .components(info.vod_components().unwrap_or_default());
 
+        increment!(EXTERNAL_CALLS; "service": "discord", "endpoint": "edit_message");
         let msg = match message
             .channel_id
             .edit_message(self.client.deref(), message.message_id, msg)
@@ -727,6 +731,7 @@ impl InnerConnection {
 
         match notif {
             Notification::Online(..) | Notification::Update(..) => {
+                increment!(EXTERNAL_CALLS; "service": "discord", "endpoint": "edit_message");
                 let msg = match message
                     .channel_id
                     .edit_message(
@@ -819,6 +824,7 @@ impl InnerConnection {
 
         match notif {
             Notification::Online(..) | Notification::Update(..) => {
+                increment!(EXTERNAL_CALLS; "service": "discord", "endpoint": "send_message");
                 let msg = match channel
                     .send_message(
                         self.client.deref(),
