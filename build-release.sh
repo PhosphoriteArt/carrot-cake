@@ -25,10 +25,10 @@ wait
 cd dist
 rm -rf out
 mkdir -p out
-cp aarch64-apple-darwin/release/carrot_cake dist/carrot-cake-macos-arm64
-cp aarch64-unknown-linux-musl/release/carrot_cake dist/carrot-cake-linux-arm64
-cp x86_64-unknown-linux-musl/release/carrot_cake dist/carrot-cake-linux-x86_64
-cp x86_64-pc-windows-msvc/release/carrot_cake.exe dist/carrot-cake-windows-x86_64.exe
+cp aarch64-apple-darwin/aarch64-apple-darwin/release/carrot_cake out/carrot-cake-macos-arm64
+cp aarch64-unknown-linux-musl/aarch64-unknown-linux-musl/release/carrot_cake out/carrot-cake-linux-arm64
+cp x86_64-unknown-linux-musl/x86_64-unknown-linux-musl/release/carrot_cake out/carrot-cake-linux-x86_64
+cp x86_64-pc-windows-msvc/x86_64-pc-windows-msvc/release/carrot_cake.exe out/carrot-cake-windows-x86_64.exe
 cd out
 zip ../out.zip \
   carrot-cake-macos-arm64 \
