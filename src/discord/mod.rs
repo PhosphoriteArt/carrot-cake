@@ -13,9 +13,9 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, FixedOffset, Utc};
-use dashmap::{DashMap, Entry};
+use dashmap::{DashMap, DashSet, Entry};
 use serenity::{
     Client,
     all::{
@@ -61,7 +61,7 @@ struct StreamInfo {
 }
 
 impl StreamInfo {
-    fn to_pairs_with_context(self) -> (Vec<(&'static str, String)>, String, Option<String>) {
+    fn into_pairs_with_context(self) -> (Vec<(&'static str, String)>, String, Option<String>) {
         (
             [
                 Some(("game_name", self.game_name)),
@@ -106,7 +106,7 @@ impl StreamInfo {
             offline,
         }
     }
-    fn from_pairs_with_context<'a>(
+    fn from_pairs_with_context(
         pairs: impl IntoIterator<Item = (String, String)>,
         stream_thumbnail: String,
         user_icon: Option<String>,
@@ -163,40 +163,18 @@ impl StreamInfo {
             };
         }
 
-        let Some(game_name) = game_name else {
-            return None;
-        };
-        let Some(viewer_count) = viewer_count else {
-            return None;
-        };
-        let Some(user_name) = user_name else {
-            return None;
-        };
-        let Some(user_login) = user_login else {
-            return None;
-        };
-        let Some(game_id) = game_id else {
-            return None;
-        };
-        let Some(stream_id) = stream_id else {
-            return None;
-        };
-        let Some(stream_title) = stream_title else {
-            return None;
-        };
-
         Some(Self {
             started_at,
             video_id,
             ping,
-            game_name,
-            viewer_count,
-            user_name,
-            user_login,
+            game_name: game_name?,
+            viewer_count: viewer_count?,
+            user_name: user_name?,
+            user_login: user_login?,
             user_icon,
-            game_id,
-            stream_id,
-            stream_title,
+            game_id: game_id?,
+            stream_id: stream_id?,
+            stream_title: stream_title?,
             stream_thumbnail,
             offline,
         })
@@ -296,7 +274,7 @@ impl StreamInfo {
             .add_route("ttv-boxart")
             .add_route(&format!("{}.jpg", self.game_id));
 
-        for (key, value) in self.clone().to_pairs_with_context().0 {
+        for (key, value) in self.clone().into_pairs_with_context().0 {
             thumb_url.add_param(&urlencoding::encode(key), &urlencoding::encode(&value));
         }
 
@@ -334,8 +312,15 @@ struct StreamNotifMessage {
     channel_id: ChannelId,
     message_id: MessageId,
     timestamp: Timestamp,
+    edited_timestamp: Option<Timestamp>,
 
     info: StreamInfo,
+}
+
+impl StreamNotifMessage {
+    fn touched_timestamp(&self) -> &Timestamp {
+        self.edited_timestamp.as_ref().unwrap_or(&self.timestamp)
+    }
 }
 
 impl TryFrom<Message> for StreamNotifMessage {
@@ -346,16 +331,10 @@ impl TryFrom<Message> for StreamNotifMessage {
             .embeds
             .into_iter()
             .find_map(|e| {
-                let Some(thumb) = e.thumbnail else {
-                    return None;
-                };
-                let Some(image) = e.image else {
-                    return None;
-                };
+                let thumb = e.thumbnail?;
+                let image = e.image?;
                 let user_icon = e.author.and_then(|au| au.icon_url);
-                let Ok(url) = reqwest::Url::parse(&thumb.url) else {
-                    return None;
-                };
+                let url = reqwest::Url::parse(&thumb.url).ok()?;
 
                 StreamInfo::from_pairs_with_context(
                     url.query_pairs()
@@ -371,6 +350,7 @@ impl TryFrom<Message> for StreamNotifMessage {
             message_id: msg.id,
             channel_id: msg.channel_id,
             timestamp: msg.timestamp,
+            edited_timestamp: msg.edited_timestamp,
             info: stream_info,
         })
     }
@@ -390,6 +370,7 @@ pub struct InnerConnection {
     // We'll resync this cache from the 50 latest messages
     // in a given channel on startup and when there's a cache miss.
     message_cache: Arc<DashMap<(ChannelId, StreamId), StreamNotifMessage>>,
+    cache_ready_for_channel: Arc<DashSet<ChannelId>>,
     initial_sync_complete: SyncEvent,
     initial_reconciliation_finished: SyncEvent,
 }
@@ -425,6 +406,7 @@ impl DiscordConnection {
                 closed_periodic_resync: SyncEvent::new(),
                 closed_discord_client: SyncEvent::new(),
                 message_cache: Arc::new(DashMap::new()),
+                cache_ready_for_channel: Arc::new(DashSet::new()),
                 initial_reconciliation_finished: SyncEvent::new(),
                 initial_sync_complete: SyncEvent::new(),
             }),
@@ -604,12 +586,16 @@ impl InnerConnection {
             }
         }
 
-        for entry in self.message_cache.iter() {
-            let (_, stream_id) = &entry.key();
-            if !seen.contains(stream_id) {
-                let mut with_offline = entry.value().info.clone();
+        for (stream_id, message) in self
+            .message_cache
+            .iter()
+            .map(|f| (f.key().1.clone(), f.value().clone()))
+            .collect::<Vec<_>>()
+        {
+            if !seen.contains(&stream_id) {
+                let mut with_offline = message.info.clone();
                 with_offline.offline = true;
-                if let Err(e) = self.set_offline(entry.value(), &with_offline).await {
+                if let Err(e) = self.set_offline(&message, &with_offline).await {
                     log::warn!("Error setting offline message: {e}");
                 }
             }
@@ -619,7 +605,10 @@ impl InnerConnection {
         Ok(())
     }
 
-    async fn sync_channel_messages(&self, channel: ChannelId) -> Vec<StreamNotifMessage> {
+    async fn sync_channel_messages(
+        &self,
+        channel: ChannelId,
+    ) -> anyhow::Result<Vec<StreamNotifMessage>> {
         match self.get_channel_messages(channel).await {
             Ok(mut messages) => {
                 messages.sort_by_key(|m| m.timestamp);
@@ -628,7 +617,7 @@ impl InnerConnection {
                     let key = (message.channel_id, message.info.stream_id.clone());
                     match self.message_cache.entry(key.clone()) {
                         Entry::Occupied(mut ent) => {
-                            if message.timestamp > ent.get().timestamp {
+                            if message.touched_timestamp() > ent.get().touched_timestamp() {
                                 ent.insert(message);
                             }
                         }
@@ -637,11 +626,11 @@ impl InnerConnection {
                         }
                     };
                 }
-                ret
+                self.cache_ready_for_channel.insert(channel);
+                Ok(ret)
             }
             Err(e) => {
-                log::error!("Channel sync error: {e}");
-                Vec::new()
+                bail!("Channel sync error: {e}");
             }
         }
     }
@@ -680,10 +669,15 @@ impl InnerConnection {
             msg = msg.components(vods)
         }
 
-        message
+        let msg = message
             .channel_id
             .edit_message(self.client.deref(), message.message_id, msg)
             .await?;
+
+        if let Ok(msg) = StreamNotifMessage::try_from(msg) {
+            self.message_cache
+                .insert((msg.channel_id, info.stream_id.clone()), msg);
+        }
 
         Ok(())
     }
@@ -710,7 +704,7 @@ impl InnerConnection {
 
         match notif {
             Notification::Online(..) | Notification::Update(..) => {
-                message
+                let msg = message
                     .channel_id
                     .edit_message(
                         self.client.deref(),
@@ -721,6 +715,10 @@ impl InnerConnection {
                             .components(new_info.streaming_components()),
                     )
                     .await?;
+                if let Ok(msg) = StreamNotifMessage::try_from(msg) {
+                    self.message_cache
+                        .insert((msg.channel_id, new_info.stream_id.clone()), msg);
+                }
             }
             Notification::Offline(..) => {
                 self.set_offline(message, &new_info).await?;
@@ -736,24 +734,23 @@ impl InnerConnection {
         ping: Option<&str>,
         notif: &Notification,
     ) -> anyhow::Result<bool> {
-        if let Entry::Occupied(cached) = self
+        if let Some(cached) = self
             .message_cache
-            .entry((*channel, notif.stream().id.clone()))
+            .get(&(*channel, notif.stream().id.clone()))
+            .map(|opt| opt.clone())
         {
-            if let Err(e) = self
-                .update_existing_message(&cached.get(), ping, notif)
-                .await
-            {
+            if let Err(e) = self.update_existing_message(&cached, ping, notif).await {
                 log::warn!(
                     "Failed to edit message on first try, backing off and trying again: {e}"
                 );
-                cached.remove();
                 tokio::time::sleep(Duration::from_secs(5)).await;
+            } else {
+                return Ok(true);
             }
         }
         let last_info = self
             .sync_channel_messages(*channel)
-            .await
+            .await?
             .into_iter()
             .rev()
             .find(|v| v.info.stream_id == notif.stream().id);
@@ -781,11 +778,15 @@ impl InnerConnection {
             return Ok("none");
         }
 
+        if !self.cache_ready_for_channel.contains(channel) {
+            bail!("Cache not ready for {channel}; was there a failure earlier?");
+        }
+
         let new_info = self.info_from_notif(notif, ping);
 
         match notif {
             Notification::Online(..) | Notification::Update(..) => {
-                channel
+                let msg = channel
                     .send_message(
                         self.client.deref(),
                         CreateMessage::new()
@@ -794,6 +795,12 @@ impl InnerConnection {
                             .components(new_info.streaming_components()),
                     )
                     .await?;
+
+                if let Ok(msg) = StreamNotifMessage::try_from(msg) {
+                    self.message_cache
+                        .insert((*channel, new_info.stream_id.clone()), msg);
+                }
+
                 Ok("new")
             }
             _ => Ok("none"),

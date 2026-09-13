@@ -1,12 +1,15 @@
 use std::env;
 
-use tokio::signal;
+use tokio::{
+    signal,
+    sync::broadcast::error::RecvError::{Closed, Lagged},
+};
 
 use crate::{
     config::{BY_GUILD_ID, CONFIG},
     discord::DiscordConnection,
-    twitch::{OnlineClient, client::TwitchMessage},
-    util::metrics,
+    twitch::OnlineClient,
+    util::{SyncEvent, metrics},
 };
 
 pub(crate) mod config;
@@ -31,13 +34,12 @@ async fn main() -> anyhow::Result<()> {
         env::var("CLIENT_SECRET").expect("Expected a token in the environment");
     let discord_token = env::var("BOT_TOKEN").expect("Expected a token in the environment");
 
-    let olwatcher = OnlineClient::new(
+    let (olwatcher, mut recv, mut reconcile) = OnlineClient::new(
         twitch_client_id,
         twitch_client_secret,
         CONFIG.streams.iter().map(|s| &s.streamer_login),
     )
     .await?;
-    let mut recv = olwatcher.handle();
 
     let discord_client =
         DiscordConnection::new(discord_token, olwatcher.broadcaster_ids.clone()).await?;
@@ -52,24 +54,34 @@ async fn main() -> anyhow::Result<()> {
         cpy.close().await;
         log::info!("Discord shutdown successful");
     });
-
-    while let Ok(evt) = recv.recv().await {
-        log::info!("Got twitch event: {evt:?}");
-        let cli = discord_client.clone();
-        let _ = tokio::spawn(async move {
-            match evt {
-                TwitchMessage::Delta(notification) => {
-                    if let Err(e) = cli.update_stream(notification).await {
-                        log::error!("Error updating discord: {e}")
-                    }
-                }
-                TwitchMessage::Reconcile(items) => {
-                    if let Err(e) = cli.reconcile(items).await {
-                        log::error!("Error updating discord: {e}")
-                    }
-                }
+    let discord_client_copy = discord_client.clone();
+    let initial_reconciliation = SyncEvent::new();
+    let initial_reconciliation_waiter = initial_reconciliation.clone();
+    tokio::spawn(async move {
+        while let Ok(evt) = reconcile.recv().await {
+            if let Err(e) = discord_client_copy.reconcile(evt).await {
+                log::error!("Error updating discord: {e}")
             }
-        });
+            initial_reconciliation.signal().await;
+        }
+    });
+
+    initial_reconciliation_waiter.wait().await;
+    loop {
+        let evt = match recv.recv().await {
+            Ok(evt) => evt,
+            Err(e) => match e {
+                Closed => break,
+                Lagged(n) => {
+                    log::error!("Lagged, dropped {n} events");
+                    continue;
+                }
+            },
+        };
+        log::info!("Got twitch event: {evt:?}");
+        if let Err(e) = discord_client.update_stream(evt).await {
+            log::error!("Error updating discord: {e}")
+        }
     }
 
     log::info!("Shutting down metrics");

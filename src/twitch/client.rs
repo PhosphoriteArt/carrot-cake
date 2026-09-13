@@ -25,18 +25,6 @@ use crate::util::{
 };
 
 #[derive(Clone, Debug)]
-pub enum TwitchMessage {
-    Delta(Notification),
-    Reconcile(Vec<(Stream, Option<Video>)>),
-}
-
-impl From<Notification> for TwitchMessage {
-    fn from(value: Notification) -> Self {
-        TwitchMessage::Delta(value)
-    }
-}
-
-#[derive(Clone, Debug)]
 pub enum Notification {
     Online(Stream, Option<Video>),
     Update(Stream, Option<Video>),
@@ -68,7 +56,8 @@ pub struct InnerOnlineClient {
     pub curr_token: Mutex<AppAccessToken>,
     pub curr_client_id: Mutex<Option<String>>,
 
-    pub cast: broadcast::Sender<TwitchMessage>,
+    pub cast: broadcast::Sender<Notification>,
+    pub reconcile: broadcast::Sender<Vec<(Stream, Option<Video>)>>,
 
     pub close: SyncEvent,
     pub ws_closed: SyncEvent,
@@ -192,12 +181,12 @@ impl InnerOnlineClient {
 
     pub async fn full_sync(&self) -> anyhow::Result<()> {
         self.do_sync(self.broadcaster_ids.keys().cloned()).await?;
-        self.cast.send(TwitchMessage::Reconcile(
+        self.reconcile.send(
             self.state
                 .iter()
                 .map(|ent| (ent.value().0.clone(), ent.value().1.clone()))
                 .collect(),
-        ))?;
+        )?;
 
         Ok(())
     }
@@ -247,12 +236,12 @@ impl InnerOnlineClient {
                             let orig = ent.get();
                             if (&orig.0, &orig.1) != (&next, &video) {
                                 ent.insert((next.clone(), video.clone()));
-                                self.cast.send(Notification::Update(next, video).into())?;
+                                self.cast.send(Notification::Update(next, video))?;
                             }
                         }
                         Entry::Vacant(ent) => {
                             ent.insert((next.clone(), video.clone()));
-                            self.cast.send(Notification::Online(next, video).into())?;
+                            self.cast.send(Notification::Online(next, video))?;
                         }
                     }
                 }
@@ -271,7 +260,7 @@ impl InnerOnlineClient {
                 match self.state.entry(uid) {
                     Entry::Occupied(ent) => {
                         let v = ent.remove();
-                        self.cast.send(Notification::Offline(v.0, v.1).into())?;
+                        self.cast.send(Notification::Offline(v.0, v.1))?;
                     }
                     Entry::Vacant(_) => {}
                 }

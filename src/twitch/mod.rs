@@ -11,18 +11,15 @@ use dashmap::DashMap;
 use serenity::futures::future::join_all;
 use tokio::sync::broadcast;
 use twitch_api::{
-    helix::search::SearchChannelsRequest,
-    twitch_oauth2::{AppAccessToken, ClientId, ClientSecret},
+    helix::{search::SearchChannelsRequest, streams::Stream, videos::Video}, twitch_oauth2::{AppAccessToken, ClientId, ClientSecret},
 };
 
 use anyhow::anyhow;
 
 use crate::{
     twitch::{
-        client::{InnerOnlineClient, TwitchMessage},
-        websocket::WebsocketRunner,
-    },
-    util::{
+        client::{InnerOnlineClient, Notification}, websocket::WebsocketRunner,
+    }, util::{
         SyncEvent,
         metrics::{self},
     },
@@ -46,12 +43,17 @@ impl Deref for OnlineClient {
 }
 
 impl OnlineClient {
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(name = "OnlineClient::new")]
     pub async fn new<S: ToString>(
         client_id: impl Into<ClientId> + Clone + Debug,
         client_secret: impl Into<ClientSecret> + Clone + Debug,
         streamers: impl Iterator<Item = S> + Debug,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<(
+        Self,
+        broadcast::Receiver<Notification>,
+        broadcast::Receiver<Vec<(Stream, Option<Video>)>>,
+    )> {
         let twitch_client = twitch_api::helix::HelixClient::with_client(metrics::client());
         let token: AppAccessToken =
             twitch_api::twitch_oauth2::AppAccessToken::get_app_access_token(
@@ -124,6 +126,9 @@ impl OnlineClient {
             streamer_map.insert(streamer.id.clone(), streamer);
         }
 
+        let (cast, cast_recv) = broadcast::channel(16);
+        let (reconcile, reconcile_recv) = broadcast::channel(16);
+
         let client = OnlineClient {
             inner: Arc::new(InnerOnlineClient {
                 client: twitch_client,
@@ -131,7 +136,8 @@ impl OnlineClient {
                 curr_client_id: Mutex::new(None),
                 broadcaster_ids: streamer_map,
                 conduit_id: conduit.id,
-                cast: broadcast::channel(16).0,
+                cast,
+                reconcile,
                 close: SyncEvent::new(),
                 ws_closed: SyncEvent::new(),
                 live_sync_closed: SyncEvent::new(),
@@ -150,12 +156,7 @@ impl OnlineClient {
 
         log::info!("Websocket started");
 
-        Ok(client)
-    }
-
-    // returns a listener for the events we're pushing out
-    pub fn handle(&self) -> broadcast::Receiver<TwitchMessage> {
-        self.inner.cast.subscribe()
+        Ok((client, cast_recv, reconcile_recv))
     }
 
     // Indicate that we're closing out and wait for our background tasks to finish.
