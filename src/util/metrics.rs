@@ -31,6 +31,13 @@ lazy_static! {
     pub static ref GUILDS: Gauge<u64> = _ROOT.u64_gauge("bb.discord.guilds").build();
     pub static ref UPDATES: Counter<u64> = _ROOT.u64_counter("bb.discord.updates").build();
     pub static ref MESSAGES: Counter<u64> = _ROOT.u64_counter("bb.discord.message").build();
+    pub static ref CHANNEL_SYNCS: Counter<u64> =
+        _ROOT.u64_counter("bb.discord.channel.sync").build();
+    pub static ref CHANNEL_SYNC_MESSAGES: Counter<u64> = _ROOT
+        .u64_counter("bb.discord.channel.sync.messages")
+        .build();
+    pub static ref CHANNEL_WRITES: Counter<u64> =
+        _ROOT.u64_counter("bb.discord.channel.write").build();
 }
 
 pub async fn init() -> anyhow::Result<Box<dyn FnOnce()>> {

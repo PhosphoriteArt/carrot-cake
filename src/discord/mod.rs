@@ -37,7 +37,10 @@ use crate::{
     twitch::client::Notification,
     util::{
         SyncEvent,
-        metrics::{GUILDS, UPDATES, increment, record},
+        metrics::{
+            CHANNEL_SYNC_MESSAGES, CHANNEL_SYNCS, CHANNEL_WRITES, GUILDS, UPDATES, increment,
+            record,
+        },
     },
 };
 
@@ -467,6 +470,7 @@ impl InnerConnection {
         });
     }
 
+    #[tracing::instrument(skip(self))]
     async fn resync_guilds(&self) -> anyhow::Result<()> {
         log::debug!("Refreshing guilds");
 
@@ -522,6 +526,7 @@ impl InnerConnection {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self))]
     async fn update_stream(&self, notif: Notification, edit_only: bool) -> anyhow::Result<()> {
         let guilds = self.guilds.lock().unwrap().clone();
         let login = &notif.stream().user_login;
@@ -571,6 +576,7 @@ impl InnerConnection {
         }
     }
 
+    #[tracing::instrument(skip(self))]
     pub async fn reconcile(
         &self,
         twitch_items: Vec<(Stream, Option<Video>)>,
@@ -605,12 +611,14 @@ impl InnerConnection {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self))]
     async fn sync_channel_messages(
         &self,
         channel: ChannelId,
     ) -> anyhow::Result<Vec<StreamNotifMessage>> {
         match self.get_channel_messages(channel).await {
             Ok(mut messages) => {
+                increment!(CHANNEL_SYNCS; "channel_id": channel.to_string(), "success": "true");
                 messages.sort_by_key(|m| m.timestamp);
                 let ret = messages.clone();
                 for message in messages.into_iter().rev() {
@@ -618,10 +626,14 @@ impl InnerConnection {
                     match self.message_cache.entry(key.clone()) {
                         Entry::Occupied(mut ent) => {
                             if message.touched_timestamp() > ent.get().touched_timestamp() {
+                                increment!(CHANNEL_SYNC_MESSAGES; "channel_id": channel.to_string(), "cache": "update");
                                 ent.insert(message);
+                            } else {
+                                increment!(CHANNEL_SYNC_MESSAGES; "channel_id": channel.to_string(), "cache": "hit");
                             }
                         }
                         Entry::Vacant(ent) => {
+                            increment!(CHANNEL_SYNC_MESSAGES; "channel_id": channel.to_string(), "cache": "miss");
                             ent.insert(message);
                         }
                     };
@@ -630,6 +642,7 @@ impl InnerConnection {
                 Ok(ret)
             }
             Err(e) => {
+                increment!(CHANNEL_SYNCS; "channel_id": channel.to_string(), "success": "false");
                 bail!("Channel sync error: {e}");
             }
         }
@@ -653,12 +666,14 @@ impl InnerConnection {
             .collect())
     }
 
+    #[tracing::instrument(skip(self))]
     async fn set_offline(
         &self,
         message: &StreamNotifMessage,
         info: &StreamInfo,
     ) -> anyhow::Result<()> {
         if message.info.offline {
+            increment!(CHANNEL_WRITES; "channel_id": message.channel_id.to_string(), "action": "offline", "result": "skipped");
             return Ok(());
         }
 
@@ -667,15 +682,24 @@ impl InnerConnection {
             .add_embed(info.stream_embed())
             .components(info.vod_components().unwrap_or_default());
 
-        let msg = message
+        let msg = match message
             .channel_id
             .edit_message(self.client.deref(), message.message_id, msg)
-            .await?;
+            .await
+        {
+            Ok(msg) => msg,
+            Err(e) => {
+                increment!(CHANNEL_WRITES; "channel_id": message.channel_id.to_string(), "action": "offline", "result": "failure");
+                return Err(e.into());
+            }
+        };
 
         if let Ok(msg) = StreamNotifMessage::try_from(msg) {
             self.message_cache
                 .insert((msg.channel_id, info.stream_id.clone()), msg);
         }
+
+        increment!(CHANNEL_WRITES; "channel_id": message.channel_id.to_string(), "action": "offline", "result": "edited");
 
         Ok(())
     }
@@ -692,6 +716,7 @@ impl InnerConnection {
         )
     }
 
+    #[tracing::instrument(skip(self))]
     async fn update_existing_message(
         &self,
         message: &StreamNotifMessage,
@@ -702,7 +727,7 @@ impl InnerConnection {
 
         match notif {
             Notification::Online(..) | Notification::Update(..) => {
-                let msg = message
+                let msg = match message
                     .channel_id
                     .edit_message(
                         self.client.deref(),
@@ -712,7 +737,15 @@ impl InnerConnection {
                             .add_embed(new_info.stream_embed())
                             .components(new_info.streaming_components()),
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        increment!(CHANNEL_WRITES; "channel_id": message.channel_id.to_string(), "action": "update_online", "result": "error");
+                        return Err(e.into());
+                    }
+                };
+                increment!(CHANNEL_WRITES; "channel_id": message.channel_id.to_string(), "action": "update_online", "result": "edited");
                 if let Ok(msg) = StreamNotifMessage::try_from(msg) {
                     self.message_cache
                         .insert((msg.channel_id, new_info.stream_id.clone()), msg);
@@ -726,6 +759,7 @@ impl InnerConnection {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self))]
     async fn try_edit_cached(
         &self,
         channel: &ChannelId,
@@ -762,6 +796,7 @@ impl InnerConnection {
         }
     }
 
+    #[tracing::instrument(skip(self))]
     async fn update_stream_for_channel(
         &self,
         channel: &ChannelId,
@@ -784,7 +819,7 @@ impl InnerConnection {
 
         match notif {
             Notification::Online(..) | Notification::Update(..) => {
-                let msg = channel
+                let msg = match channel
                     .send_message(
                         self.client.deref(),
                         CreateMessage::new()
@@ -792,12 +827,22 @@ impl InnerConnection {
                             .add_embed(new_info.stream_embed())
                             .components(new_info.streaming_components()),
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        increment!(CHANNEL_WRITES; "channel_id": channel.to_string(), "action": "ping_online", "result": "error");
+
+                        return Err(e.into());
+                    }
+                };
 
                 if let Ok(msg) = StreamNotifMessage::try_from(msg) {
                     self.message_cache
                         .insert((*channel, new_info.stream_id.clone()), msg);
                 }
+
+                increment!(CHANNEL_WRITES; "channel_id": channel.to_string(), "action": "ping_online", "result": "created");
 
                 Ok("new")
             }
