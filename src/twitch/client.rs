@@ -230,8 +230,16 @@ impl InnerOnlineClient {
                         },
                         &token,
                     )
-                    .await?
-                    .first();
+                    .await
+                    .inspect_err(|e| {
+                        log::warn!(
+                            "Could not find vod for stream {} (UID {}): {e}",
+                            &next.id,
+                            &next.user_login
+                        )
+                    })
+                    .ok()
+                    .and_then(|f| f.first());
 
                 {
                     match self.state.entry(next.user_id.clone()) {
