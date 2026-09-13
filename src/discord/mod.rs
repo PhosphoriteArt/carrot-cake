@@ -135,10 +135,13 @@ impl DiscordConnection {
         let shard_manager = discord_client.shard_manager.clone();
         let await_closed = client.close.clone();
         let discord_closed = client.closed_discord_client.clone();
-
+        let client_clone = client.clone();
+        
         tokio::spawn(async move {
             await_closed.wait().await;
             shard_manager.shutdown_all().await;
+            // best effort
+            let _ = client_clone.dump_cache(cache_path()).await;
             discord_closed.signal().await;
         });
 
