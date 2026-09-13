@@ -240,7 +240,7 @@ impl StreamInfo {
             Some(("**Viewers**", self.viewer_count.to_string(), true)),
             (if self.offline
                 && let Some(dt) = self.started_at.as_ref()
-                && let Ok(duration) = dt.signed_duration_since(Utc::now()).to_std()
+                && let Ok(duration) = Utc::now().signed_duration_since(dt).to_std()
             {
                 Some((
                     "**Duration**",
@@ -662,12 +662,10 @@ impl InnerConnection {
             return Ok(());
         }
 
-        let mut msg = EditMessage::new()
+        let msg = EditMessage::new()
             .content(info.headline_vod())
-            .add_embed(info.stream_embed());
-        if let Some(vods) = info.vod_components() {
-            msg = msg.components(vods)
-        }
+            .add_embed(info.stream_embed())
+            .components(info.vod_components().unwrap_or_default());
 
         let msg = message
             .channel_id

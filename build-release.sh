@@ -13,20 +13,24 @@ export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
 export CXX_aarch64_unknown_linux_musl=aarch64-linux-musl-g++
 export AR_aarch64_unknown_linux_musl=aarch64-linux-musl-ar
 
-cargo build --target aarch64-apple-darwin --release --locked
-cargo build --target aarch64-unknown-linux-musl --release --locked
-cargo build --target x86_64-unknown-linux-musl --release --locked
-cargo xwin build --cross-compiler clang-cl --target x86_64-pc-windows-msvc --release --locked
+mkdir dist
 
-cd target
-rm -rf dist
-mkdir -p dist
+cargo build --target aarch64-apple-darwin --target-dir dist/aarch64-apple-darwin --release --locked &
+cargo build --target aarch64-unknown-linux-musl --target-dir dist/aarch64-unknown-linux-musl --release --locked &
+cargo build --target x86_64-unknown-linux-musl --target-dir dist/x86_64-unknown-linux-musl --release --locked &
+cargo xwin build --cross-compiler clang-cl --target x86_64-pc-windows-msvc --target-dir dist/x86_64-pc-windows-msvc --release --locked &
+
+wait
+
+cd dist
+rm -rf out
+mkdir -p out
 cp aarch64-apple-darwin/release/carrot_cake dist/carrot-cake-macos-arm64
 cp aarch64-unknown-linux-musl/release/carrot_cake dist/carrot-cake-linux-arm64
 cp x86_64-unknown-linux-musl/release/carrot_cake dist/carrot-cake-linux-x86_64
 cp x86_64-pc-windows-msvc/release/carrot_cake.exe dist/carrot-cake-windows-x86_64.exe
-cd dist
-zip dist.zip \
+cd out
+zip ../out.zip \
   carrot-cake-macos-arm64 \
   carrot-cake-linux-arm64 \
   carrot-cake-linux-x86_64 \
